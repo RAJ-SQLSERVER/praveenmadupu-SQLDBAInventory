@@ -11,29 +11,3 @@ JOIN ( SELECT a.database_name, max(a.backup_finish_date) backup_finish_date
 	JOIN msdb.dbo.backupmediafamily z ON x.media_set_id = z.media_set_id 
 --	where x.database_name = 'xcAdmin'
 Order by y.backup_finish_date desc
-
---DBCC Execution Status or % completed Report
-
-SELECT  session_id ,
-request_id ,
-percent_complete ,
-estimated_completion_time ,
-DATEADD(ms,estimated_completion_time,GETDATE()) AS EstimatedEndTime, 
-start_time ,
-status ,
-command 
-FROM sys.dm_exec_requests
-WHERE database_id = 16
---where session_id = 
-
-
-SELECT  session_id ,database_id,
-request_id ,
-percent_complete ,
-estimated_completion_time ,
-DATEADD(ms,estimated_completion_time,GETDATE()) AS EstimatedEndTime, 
-start_time ,
-status ,
-command 
-FROM sys.dm_exec_requests
-where session_id > 50
