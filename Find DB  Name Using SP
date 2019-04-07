@@ -1,0 +1,3 @@
+EXEC sp_msforeachdb 
+'if exists(select 1 from [?].sys.objects where name=''SPNAME'')
+select ''?'' as FoundInDb from [?].sys.objects where name=''SPNAME'''
