@@ -1,0 +1,123 @@
+--SQL Version Details.
+SELECT
+  CASE 
+     WHEN CONVERT(VARCHAR(128), SERVERPROPERTY ('productversion')) like '8%' THEN 'SQL2000'
+     WHEN CONVERT(VARCHAR(128), SERVERPROPERTY ('productversion')) like '9%' THEN 'SQL2005'
+     WHEN CONVERT(VARCHAR(128), SERVERPROPERTY ('productversion')) like '10.0%' THEN 'SQL2008'
+     WHEN CONVERT(VARCHAR(128), SERVERPROPERTY ('productversion')) like '10.5%' THEN 'SQL2008 R2'
+     WHEN CONVERT(VARCHAR(128), SERVERPROPERTY ('productversion')) like '11%' THEN 'SQL2012'
+     WHEN CONVERT(VARCHAR(128), SERVERPROPERTY ('productversion')) like '12%' THEN 'SQL2014'
+     WHEN CONVERT(VARCHAR(128), SERVERPROPERTY ('productversion')) like '13%' THEN 'SQL2016'     
+     WHEN CONVERT(VARCHAR(128), SERVERPROPERTY ('productversion')) like '14%' THEN 'SQL2017' 
+     ELSE 'unknown'
+  END AS MajorVersion,
+  SERVERPROPERTY('ProductLevel') AS ProductLevel,
+  SERVERPROPERTY('Edition') AS Edition,
+  SERVERPROPERTY('ProductVersion') AS ProductVersion
+go
+==========================
+--Fill Factor, MaxDOP, CTP, Optimize workloads
+sp_configure 'show advanced options',1
+go
+reconfigure with override
+go
+sp_configure 'show advanced options',0
+go
+reconfigure with override
+go
+sp_configure 'fill factor' 
+go
+EXEC sp_configure 'max degree of parallelism'
+go
+sp_configure 'cost threshold for parallelism'
+GO
+sp_configure 'optimize for ad hoc workloads'
+go
+==============================
+--Recovery model
+SELECT NAME, RECOVERY_MODEL_DESC FROM SYS.DATABASES 
+WHERE recovery_model_desc not IN ('FULL')
+and name not in ('master','model','msdb','tempdb')
+go
+--select name,  recovery_model_desc from  sys.databases
+=========================================
+--DB Compatibility
+select name, compatibility_level , version_name = 
+CASE compatibility_level
+    WHEN 65  THEN 'SQL Server 6.5'
+    WHEN 70  THEN 'SQL Server 7.0'
+    WHEN 80  THEN 'SQL Server 2000'
+    WHEN 90  THEN 'SQL Server 2005'
+    WHEN 100 THEN 'SQL Server 2008/R2'
+    WHEN 110 THEN 'SQL Server 2012'
+    WHEN 120 THEN 'SQL Server 2014'
+    WHEN 130 THEN 'SQL Server 2016'
+END
+from sys.databases
+--where compatibility_level <> 120
+=========================================
+-- DB Collation
+SELECT name, collation_name FROM sys.databases 
+where collation_name <> 'SQL_Latin1_General_CPI_CI_AS'
+========================
+--Job owner not equal to SA
+SELECT J.name AS Job_Name
+, L.name AS Job_Owner
+FROM msdb.dbo.sysjobs_view J
+INNER JOIN
+master.dbo.syslogins L
+ON J.owner_sid = L.sid
+where l.name <> 'sa'
+===============================
+--DB Owner Details
+SELECT name as DBName, suser_sname( owner_sid ) as UserName, * FROM sys.databases
+==========================
+--server level collation
+SELECT CONVERT (varchar, SERVERPROPERTY('collation')) AS 'Server Collation';
+go
+=====================================================
+--DB Collation Report
+SELECT 
+    name, 
+    collation_name 
+FROM sys.databases
+=====================================================
+--Page Verify and check sum
+SELECT  name AS [Database] ,
+CASE WHEN page_verify_option = 0 THEN 'NONE'
+WHEN page_verify_option = 1 THEN 'TORN_PAGE_DETECTION'
+WHEN page_verify_option = 2 THEN 'CHECKSUM'
+END AS [Page Verify]
+FROM    sys.databases
+WHERE   database_id > 4
+=====================================================
+--Auto create, update stats and autoclose, autoshrink
+SELECT name AS 'Name', 
+    is_auto_create_stats_on AS "Auto Create Stats",
+    is_auto_update_stats_on AS "Auto Update Stats",
+    is_read_only AS "Read Only" 
+FROM sys.databases
+WHERE database_ID > 4;
+GO
+SELECT [name] AS DatabaseName
+, CONVERT(varchar(10),DATABASEPROPERTYEX([Name] , 'IsAutoClose')) AS AutoClose
+, CONVERT(varchar(10),DATABASEPROPERTYEX([Name] , 'IsAutoShrink')) AS AutoShrink
+FROM master.dbo.sysdatabases
+Order By DatabaseName 
+=====================================================
+--Trace (Deadlock)
+DBCC TRACESTATUS(1222,1204,3605)
+GO
+=============================================================================
+SELECT x.database_name, z.physical_device_name, 
+CONVERT(char(20), x.backup_finish_date, 108) FinishTime, x.backup_finish_date 
+	from msdb.dbo.backupset x
+JOIN ( SELECT a.database_name, max(a.backup_finish_date) backup_finish_date 
+	FROM msdb.dbo.backupset a 
+	WHERE type = 'D' 
+	GROUP BY a.database_name ) y on x.database_name = y.database_name 
+	and x.backup_finish_date = y.backup_finish_date
+	JOIN msdb.dbo.backupmediafamily z ON x.media_set_id = z.media_set_id 
+--	where x.database_name = 'xcAdmin'
+Order by y.backup_finish_date desc
+====================================================
