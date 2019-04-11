@@ -1,0 +1,30 @@
+USE [HandSPTP];
+GO
+ALTER INDEX [_dta_index_tblJobTask_13_754817751__K3_K2_K14_K9_K8_K11_K1_K5_4_6_7_10_12_13_17] ON [dbo].[tblJobTask] REORGANIZE;
+GO
+
+USE [HandSPTP];
+GO
+ALTER INDEX [_dta_index_tblTemplateTask_7_1922105888__K4_K2_1] ON [dbo].[tblTemplateTask] REORGANIZE;
+GO
+
+USE [HandSPTP];
+GO
+ALTER INDEX [_dta_index_tblJobTask_13_754817751__K4_K2_K11_K14_K9_K8_K3_K1_K5_6_7_10_12_13_17] ON [dbo].[tblJobTask] REORGANIZE;
+GO
+
+USE [HandSPTP];
+GO
+ALTER INDEX [idxTasks] ON [dbo].[tblJobTask] REORGANIZE;
+GO
+
+USE [HandSPTP];
+GO
+ALTER INDEX [_dta_index_tblJob_7_36911203__K15_K2_K13_K9_K4_K3_K10_K8_K28_K1_K6_K17_K11_5_7_14_16_18_19_20_21_22_23_24_25_26_27_29_30_31_32_] ON [dbo].[tblJob] REORGANIZE;
+GO
+
+
+USE [HandSPTP];
+GO
+ALTER INDEX [idx_JobCellID] ON [dbo].[tblAuditJobCell] REORGANIZE;
+GO
