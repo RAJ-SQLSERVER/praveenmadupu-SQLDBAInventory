@@ -1,0 +1,25 @@
+--Database and Log backups using PowerShell
+--https://www.dbrnd.com/2016/09/sql-server-2012-all-database-and-log-backups-using-powershell/
+--SQL Server 2012 cmdlet introduced a new command to take database backups and the command name is “Backup-SqlDatabase”.
+Execute below command in PowerShell to get the help of “Backup-SqlDatabase”:
+================================================
+help Backup-SqlDatabase -full
+=================================================
+PowerShell script to take all database backups:
+Generating file name with the date.
+==================================================
+$BackupDate = Get-Date -Format MMddyy
+foreach($database in (Get-ChildItem)) { 
+$dbName = $database.Name
+$bakFilePath = "C:\temp\" + $dbName + "_" + $BackupDate + ".bak"
+Backup-SqlDatabase -Database $dbName -BackupFile $bakFilePath -Initialize }
+==================================================
+PowerShell script to take all database log backups:
+Generating file name with the date.
+=====================================================
+$BackupDate = Get-Date -Format MMddyy_hhmm
+foreach($database in (Get-ChildItem)) {
+$dbName = $database.Name
+$trnFilePath = "C:\temp\" + $dbName + "_" + $BackupDate + ".trn"
+Backup-SqlDatabase -Database $dbName -BackupAction Log -BackupFile $trnFilePath -Initialize}
+==========================================================
