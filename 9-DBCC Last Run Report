@@ -1,3 +1,5 @@
+--TSQL Script to know last DBCC Check run for all databases
+
 CREATE TABLE #DBInfoResults 
 (
 [ParentObject] VARCHAR(512),
