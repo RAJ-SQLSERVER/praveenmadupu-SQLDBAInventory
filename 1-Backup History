@@ -1,0 +1,42 @@
+--TSQL Script to check latest full backup history of all databases
+
+SELECT x.database_name, z.physical_device_name, 
+CONVERT(char(20), x.backup_finish_date, 108) FinishTime, x.backup_finish_date 
+	from msdb.dbo.backupset x
+JOIN ( SELECT a.database_name, max(a.backup_finish_date) backup_finish_date 
+	FROM msdb.dbo.backupset a 
+	WHERE type = 'D'  
+	GROUP BY a.database_name ) y on x.database_name = y.database_name 
+	and x.backup_finish_date = y.backup_finish_date
+	JOIN msdb.dbo.backupmediafamily z ON x.media_set_id = z.media_set_id 
+--	where x.database_name = 'xyz'
+Order by y.backup_finish_date desc
+
+
+--TSQL Script to check Diff backup history of all databases
+
+SELECT x.database_name, z.physical_device_name, 
+CONVERT(char(20), x.backup_finish_date, 108) FinishTime, x.backup_finish_date 
+	from msdb.dbo.backupset x
+JOIN ( SELECT a.database_name, max(a.backup_finish_date) backup_finish_date 
+	FROM msdb.dbo.backupset a 
+	WHERE type = 'I'
+	GROUP BY a.database_name ) y on x.database_name = y.database_name 
+	and x.backup_finish_date = y.backup_finish_date
+	JOIN msdb.dbo.backupmediafamily z ON x.media_set_id = z.media_set_id 
+--	where x.database_name = 'xyz'
+Order by y.backup_finish_date desc
+
+--TSQL Script to check Tlog backup history of all databases
+
+SELECT x.database_name, z.physical_device_name, 
+CONVERT(char(20), x.backup_finish_date, 108) FinishTime, x.backup_finish_date 
+	from msdb.dbo.backupset x
+JOIN ( SELECT a.database_name, max(a.backup_finish_date) backup_finish_date 
+	FROM msdb.dbo.backupset a 
+	WHERE type = 'L'
+	GROUP BY a.database_name ) y on x.database_name = y.database_name 
+	and x.backup_finish_date = y.backup_finish_date
+	JOIN msdb.dbo.backupmediafamily z ON x.media_set_id = z.media_set_id 
+--	where x.database_name = 'xyz'
+Order by y.backup_finish_date desc
