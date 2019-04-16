@@ -1,0 +1,36 @@
+--Unused Indexes of Database
+
+SELECT 
+	OBJECT_NAME(i.OBJECT_ID) AS ObjectName
+	,i.name AS UnusedIndexName	
+	,8 * SUM(au.used_pages) AS IndexSizeInKB
+	,CASE
+		WHEN i.type = 0 THEN 'Heap'  
+		WHEN i.type= 1 THEN 'Clustered' 
+		WHEN i.type=2 THEN 'Non-Clustered'   
+		WHEN i.type=3 THEN 'XML'   
+		WHEN i.type=4 THEN 'Spatial'  
+		WHEN i.type=5 THEN 'Clustered columnstore index'   
+		WHEN i.type=6 THEN 'Nonclustered columnstore index'  
+		WHEN i.type=7 THEN 'Nonclustered hash index.'
+	END index_type
+	,'DROP INDEX ' + i.name + ' ON ' + OBJECT_NAME(i.OBJECT_ID) AS DropStatement
+FROM sys.indexes AS i 
+LEFT JOIN sys.dm_db_index_usage_stats AS dius 
+	ON dius.OBJECT_ID = i.OBJECT_ID 
+		AND i.index_id = dius.index_id 
+		AND dius.database_id = DB_ID() 
+INNER JOIN sys.partitions AS p 
+	ON p.OBJECT_ID = i.OBJECT_ID 
+		AND p.index_id = i.index_id 
+INNER JOIN sys.allocation_units AS au 
+	ON au.container_id = p.partition_id 
+WHERE OBJECTPROPERTY(i.OBJECT_ID, 'IsIndexable') = 1 
+	AND OBJECTPROPERTY(i.OBJECT_ID, 'IsIndexed') = 1 
+	AND dius.index_id IS NULL
+	OR (dius.user_updates > 0 
+		AND dius.user_seeks = 0 
+		AND dius.user_scans = 0 
+		AND dius.user_lookups = 0)
+GROUP BY OBJECT_NAME(i.OBJECT_ID), i.name, i.type 
+ORDER BY OBJECT_NAME(i.OBJECT_ID)
