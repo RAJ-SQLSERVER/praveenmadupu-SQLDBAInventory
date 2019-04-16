@@ -1,3 +1,5 @@
+--TSQL Script to get Backup & Restore % completion & estimated time complete
+
 SELECT command,
             s.text,
             start_time,
