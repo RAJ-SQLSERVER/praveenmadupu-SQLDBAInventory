@@ -1,9 +1,7 @@
 --select * from sys.sysprocesses where blocked  <> 0
 go
-
-select @@servername
-go
-
+--select @@servername
+--go
 SET NOCOUNT ON; 
 SET CONCAT_NULL_YIELDS_NULL OFF 
 GO 
