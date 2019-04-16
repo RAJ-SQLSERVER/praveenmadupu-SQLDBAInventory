@@ -1,3 +1,5 @@
+--TSQL Script to get SQL Data & Log Files Free Space & Space Used of all databases
+
 Create Table #dbInfo (dId smallint, dbName sysname, gId smallint NULL, segName varchar(256) NULL, 
        filName varchar(520) NULL, sizeMB decimal(10,2) null, 
        usedMB decimal(10,2) null, freeMB decimal(10,2) null, 
@@ -15,7 +17,6 @@ pcntUsed = (usedMB/sizeMB)*100,
 pcntFree = ((sizeMB-usedMB)/sizeMB)*100
 
 select * from #dbInfo 
-where dbname in ('works')
---where dbname in ('')
-and filname like '%G:\%' order by freemb desc
+--where dbname in ('works')
+--where filname like '%G:\%' order by freemb desc -- Put drive name here for files residing on specific drive
 drop table #dbInfo
