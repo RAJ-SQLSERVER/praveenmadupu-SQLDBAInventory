@@ -1,0 +1,55 @@
+--List Of All SSIS Packages In MSDB Database
+--This code will list all SSIS packages in stored in MSDB database for SQL Server 2005, 2008 and 2012
+/*
+SELECT @@version 
+ 
+SELECT *
+FROM   msdb.dbo.sysssispackages
+ 
+SELECT *
+FROM   msdb.dbo.sysssispackagefolders
+*/
+ 
+IF @@version LIKE '%SQL Server 2005%' 
+    SELECT  a.name AS PackageName ,
+            a.[description] AS [Description] ,
+            b.foldername AS FolderName ,
+            CASE a.packagetype
+              WHEN 0 THEN 'Default client'
+              WHEN 1 THEN 'I/O Wizard'
+              WHEN 2 THEN 'DTS Designer'
+              WHEN 3 THEN 'Replication'
+              WHEN 5 THEN 'SSIS Designer'
+              WHEN 6 THEN 'Maintenance Plan'
+              ELSE 'Unknown'
+            END AS PackageTye ,
+            c.name AS OwnerName ,
+            a.createdate AS CreateDate ,
+            DATALENGTH(a.packagedata) AS PackageSize
+    FROM    msdb.dbo.sysdtspackages90 AS a --SQL 2005
+            INNER JOIN msdb.dbo.sysdtspackagefolders90 AS b --SQL 2005
+            ON a.folderid = b.folderid
+            INNER JOIN sys.syslogins AS c ON a.ownersid = c.sid
+    ORDER BY a.name
+ELSE 
+    SELECT  a.name AS PackageName ,
+            a.[description] AS [Description] ,
+            b.foldername AS FolderName ,
+            CASE a.packagetype
+              WHEN 0 THEN 'Default client'
+              WHEN 1 THEN 'I/O Wizard'
+              WHEN 2 THEN 'DTS Designer'
+              WHEN 3 THEN 'Replication'
+              WHEN 5 THEN 'SSIS Designer'
+              WHEN 6 THEN 'Maintenance Plan'
+              ELSE 'Unknown'
+            END AS PackageTye ,
+            c.name AS OwnerName ,
+            a.createdate AS CreateDate ,
+            DATALENGTH(a.packagedata) AS PackageSize
+    FROM    msdb.dbo.sysssispackages AS a --SQL 2008
+            INNER JOIN msdb.dbo.sysssispackagefolders AS b --SQL 2008
+            ON a.folderid = b.folderid
+            INNER JOIN sys.syslogins AS c ON a.ownersid = c.sid
+    ORDER BY a.name
+
