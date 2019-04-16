@@ -1,0 +1,58 @@
+--Change Owner For Sql Agent Jobs To Sa Account
+USE master
+go
+ 
+SET nocount ON
+ 
+DECLARE @jobid UNIQUEIDENTIFIER ,
+    @rec_count INT ,
+    @loop_counter INT
+ 
+--create temp table to hold the information on job id. We will pull this information from sysjobs table in
+--the msdb database
+CREATE TABLE #t_sqljobs
+    (
+      id INT IDENTITY (1, 1) ,
+      job_id UNIQUEIDENTIFIER ,
+      owner_sid VARBINARY(100 ) ,
+      username VARCHAR(100 ) ,
+      jobname VARCHAR(200 ),
+    )
+--insert the data into a temporary table from sysjobs table
+INSERT  #t_sqljobs
+        ( job_id ,
+          owner_sid ,
+          username ,
+          jobname
+        )
+        SELECT  job_id ,
+                owner_sid ,
+                SUSER_SNAME(owner_sid ) AS username ,
+                name AS jobname
+        --FROM    msdb.. sysjobs
+        --WHERE   SUSER_SNAME (owner_sid) = 'myusername'
+ 
+SELECT  *
+FROM    #t_sqljobs
+ 
+--Set up the loop counters so we can loop through all the jobs in the temporary table
+SET @loop_counter = 1
+SELECT  @rec_count = COUNT(*)
+FROM    #t_sqljobs
+ 
+--Using a while loop to go through all the records. We first get the job id and then using sp_update_job procedure,
+--will change the job owner to SA
+WHILE @loop_counter <= @rec_count
+    BEGIN
+ 
+        SELECT  @jobid = job_id
+        FROM    #t_sqljobs
+        WHERE   id = @loop_counter
+--print 'job id is ' + cast (@jobid as varchar(100))
+        EXEC msdb. dbo.sp_update_job @job_id = @jobid, @owner_login_name = 'sa'
+ 
+        SET @loop_counter = @loop_counter + 1
+ 
+    END
+ 
+DROP TABLE #t_sqljobs
