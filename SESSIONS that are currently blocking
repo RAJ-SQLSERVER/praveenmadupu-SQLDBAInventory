@@ -1,0 +1,59 @@
+--SESSIONS that are currently blocking
+--https://sqlschoolhouse.wordpress.com/category/sql-server-dba-scripts/
+/******* Find the SESSIONS that are currently blocking ******/
+
+CREATE TABLE #who2
+(SPID int NOT NULL,
+[Status] varchar(100),
+Login varchar(50) ,
+HostName varchar(100),
+[BlkBy] varchar(20) ,
+DBName varchar(55) ,
+Command varchar(256),
+CPUTime varchar(20),
+DiskIO varchar(20),
+LastBatch varchar(100),
+ProgramName varchar(100),
+SPID2 varchar(20),
+RequestID varchar(20)
+)
+INSERT INTO #who2
+EXEC master.sys.sp_who2 active
+SELECT r.session_id AS SPID
+,(SELECT MAX(HostName) FROM #who2 WHERE SPID = r.session_ID) AS Server
+,(select max(sysprocesses.hostprocess) from master.dbo.sysprocesses (nolock) where sysprocesses.spid = r.session_id) as TaskManagerPID
+,(SELECT MAX(LOGIN) FROM #who2 WHERE SPID = r.session_ID) AS Login
+–,p.cpu as CPUTime, p.physical_io as DiskIO
+,(SELECT SUM(cast(CPUTime as bigint)) FROM #who2 WHERE SPID = r.session_ID) AS CPUTime
+,(SELECT SUM(cast(DiskIO as int)) FROM #who2 WHERE SPID = r.session_ID) AS DiskIO
+,CONVERT(VARCHAR(16),start_time,120) AS start_time
+,(SELECT MAX(DBName) FROM #who2 WHERE SPID = r.session_ID) AS DBName
+— ,(SELECT MAX(Command) FROM #who2 WHERE SPID = r.session_ID) AS Command
+— ,qt.text,r.statement_start_offset, r.statement_end_offset
+,substring(qt.text,r.statement_start_offset/2,
+(case when r.statement_end_offset = -1 then len(convert(nvarchar(max), qt.text)) * 2
+else r.statement_end_offset end – r.statement_start_offset)/2 + 1) as query_text — this is the statement executing right now
+— ,qt.dbid
+— ,qt.objectid
+,blocking_session_id AS BlockingSPID
+— ,substring(convert(char(23),DATEADD(ms ,r.cpu_time, 0),121 ),12,8) AS cpu_time
+,RIGHT(‘0’+CONVERT(VARCHAR,(DATEDIFF(ss,start_time,GETDATE()))/(3600)),2) + ‘:’+RIGHT(‘0’+CONVERT(VARCHAR,(DATEDIFF(ss,start_time,GETDATE()))%(3600)/60),2)+’:’+RIGHT(‘0’+CONVERT(VARCHAR,(DATEDIFF(ss,start_time,GETDATE()))%60),2) AS elapsed_time
+,SUBSTRING(CONVERT(VARCHAR,CAST(r.reads AS MONEY),1),1,LEN(CONVERT(VARCHAR,CAST(r.reads AS MONEY),1))-3) AS reads
+,SUBSTRING(CONVERT(VARCHAR,CAST(r.writes AS MONEY),1),1,LEN(CONVERT(VARCHAR,CAST(r.writes AS MONEY),1))-3) AS writes
+,SUBSTRING(CONVERT(VARCHAR,CAST(r.logical_reads AS MONEY),1),1,LEN(CONVERT(VARCHAR,CAST(r.logical_reads AS MONEY),1))-3) AS logical_reads
+,(SELECT MAX(ProgramName) FROM #who2 WHERE SPID = r.session_ID) AS ProgramName
+,wait_type ,wait_time –,wait_resource
+,r.status
+–,*
+–,r.scheduler_id
+FROM sys.dm_exec_requests r (NOLOCK)
+–inner join master.dbo.sysprocesses p with (nolock)
+–on p.spid = r.session_id
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) as qt
+WHERE r.session_id > 50
+AND qt.text NOT LIKE ‘%SELECT r.session_id%’
+–AND r.session_id IN (SELECT SPID FROM #who2 WHERE LOGIN LIKE ‘%siitusr%’)
+ORDER BY 3,1
+go
+drop table #who2
+go
