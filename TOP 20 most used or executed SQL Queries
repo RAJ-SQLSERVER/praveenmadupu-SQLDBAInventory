@@ -1,0 +1,15 @@
+--TOP 20 most used or executed SQL Queries
+SELECT TOP 20
+	deqs.execution_count AS TotalExecutionTime
+	,OBJECT_NAME(objectid) AS ObjectName
+	,QueryText = SUBSTRING(
+		dest.text,
+		deqs.statement_start_offset/2,         
+		(CASE WHEN deqs.statement_end_offset = -1 
+			THEN len(CONVERT(nvarchar(MAX), dest.text)) * 2 
+			ELSE deqs.statement_end_offset 
+			END - deqs.statement_start_offset)/2)	
+	,DatabaseName = db_name(dest.dbid) 
+FROM sys.dm_exec_query_stats AS deqs
+CROSS APPLY sys.dm_exec_sql_text(deqs.sql_handle) AS dest
+ORDER BY deqs.execution_count DESC
