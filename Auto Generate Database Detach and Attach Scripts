@@ -1,0 +1,61 @@
+--Auto Generate Database Detach and Attach Scripts
+Execute this script to generate detach scripts for all databases:
+
+DECLARE @DatabaseName AS VARCHAR(255)
+DECLARE CurDetach CURSOR FOR
+  
+  SELECT name
+  FROM   MASTER.sys.databases
+  WHERE  owner_sid > 1;
+ 
+OPEN CurDetach
+FETCH Next FROM CurDetach INTO @DatabaseName
+WHILE @@FETCH_STATUS = 0
+  BEGIN      
+	  PRINT 
+		'ALTER DATABASE ' + @DatabaseName + ' SET SINGLE_USER WITH ROLLBACK IMMEDIATE' 
+		+ CHAR(10) + ' GO' + CHAR(10) +
+		'sp_detach_db ' + @DatabaseName + CHAR(10)
+		+ ' GO' + CHAR(10) + 'Print ''Detach of '
+		+ @DatabaseName
+		+ ' database completed successfully'''
+		+ CHAR(10) + ' GO'
+ 
+      FETCH NEXT FROM CurDetach INTO @DatabaseName
+  END
+ 
+CLOSE CurDetach
+DEALLOCATE CurDetach
+===============================================================
+Execute this script to generate attach scripts for all databases:
+You can change your file name or file path using @Filepath variable.
+
+
+DECLARE @DatabaseName AS VARCHAR(255)
+DECLARE @Filepath AS VARCHAR(255)
+ 
+SET @Filepath = 'C:\SQLDATA\'
+ 
+DECLARE CurAttach CURSOR FOR
+  SELECT name
+  FROM   MASTER.sys.databases
+  WHERE  owner_sid > 1;
+ 
+OPEN CurAttach
+FETCH Next FROM CurAttach INTO @DatabaseName
+WHILE @@FETCH_STATUS = 0
+  BEGIN      
+	  PRINT 
+		'CREATE DATABASE ' + @DatabaseName + ' ON
+		(FILENAME = '+ @Filepath + @DatabaseName +'.mdf)
+		,(FILENAME = '+ @Filepath + @DatabaseName +'.ldf)
+		FOR ATTACH
+		GO
+ 
+		ALTER DATABASE '+ @DatabaseName +' SET MULTI_USER WITH ROLLBACK IMMEDIATE
+		GO'
+      FETCH NEXT FROM CurAttach INTO @DatabaseName
+  END
+ 
+CLOSE CurAttach
+DEALLOCATE CurAttach
