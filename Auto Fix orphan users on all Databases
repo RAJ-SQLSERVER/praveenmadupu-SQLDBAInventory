@@ -1,0 +1,45 @@
+--Auto Fix orphan users on all Databases
+--https://sql-box.com/category/dba-scripts/
+use master
+go
+DECLARE @DB_Name varchar(100)  
+DECLARE @Command nvarchar(2000) 
+DECLARE database_cursor CURSOR FOR  
+SELECT name 
+FROM  sys.databases where database_id>4 
+and name not like '%master%' 
+ 
+OPEN database_cursor 
+ 
+FETCH NEXT FROM database_cursor INTO @DB_Name 
+ 
+WHILE @@FETCH_STATUS = 0  
+BEGIN  
+                          
+SELECT @Command ='  
+                            use '+ @DB_Name+';  
+                            declare @query varchar(1000) 
+                            declare @executequery cursor 
+                            set @executequery=cursor for 
+                            select '' sp_change_users_login ''+CHAR(39)+''update_one''+CHAR(39)+'',''+CHAR(39)+name+CHAR(39)+'',''+CHAR(39)+name+CHAR(39) 
+                            from sysusers 
+                            where issqluser = 1 and (sid is not null and sid <> 0x0) AND SUSER_SNAME(sid) IS NULL 
+                            open @executequery 
+                            fetch next from @executequery into @query 
+                            while @@fetch_status=0 
+                            begin  
+                             exec (@query) 
+                             print (@query) 
+                            fetch next from @executequery into @query 
+                            end 
+                            close @executequery; 
+                            deallocate @executequery; 
+                            go' 
+                             
+                            print @Command 
+                           
+  FETCH NEXT FROM database_cursor INTO @DB_Name  
+END 
+ 
+CLOSE database_cursor  
+DEALLOCATE database_cursor
