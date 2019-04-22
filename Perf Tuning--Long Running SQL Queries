@@ -1,0 +1,67 @@
+SET NOCOUNT ON
+
+DECLARE @Threshold INT
+SET     @Threshold = 5
+
+declare @SPID INT, @CNT INT, @TotalCnt INT
+declare @SQL_Text VARCHAR(4000)
+
+SET @CNT = 1
+
+DECLARE @Process TABLE
+(
+    	IDT INT			IDENTITY(1,1) 		 ,
+	Long_Process_Threshold	INT			 ,
+	Current_Run_Time	INT			 ,
+	SPID			INT			 ,
+	[Program_Name]		VARCHAR(200) 		 ,
+	Login_Time		DATETIME		 ,
+	Last_Batch		DATETIME	  	 ,
+	SQL_Statements		VARCHAR(4000)
+)
+
+CREATE TABLE #INPUT 
+(
+  EventType  	VARCHAR(100) 	,
+  Parameters	INT		,
+  SQL_Text	VARCHAR(4000)
+)	
+
+INSERT INTO @Process
+SELECT			@Threshold [Long Process Threshold]
+		,	DATEDIFF(mi, last_batch, getdate()) [Current Run Time]
+		,	SPID [Session ID]
+		,	Program_Name [Program]
+		,	Login_TIme
+		,	Last_Batch [Last Batch]
+		,	'' [SQL]
+
+FROM master.dbo.sysprocesses s
+--WHERE STATUS = 'RUNNABLE'
+--AND 
+WHERE DATEDIFF(mi, last_batch, getdate()) > @Threshold
+
+SELECT @TotalCnt = (SELECT count(*) from @Process)
+
+WHILE (@CNT <= @TotalCnt)
+BEGIN
+
+   set @SPID = (select SPID from @Process where IDT = @CNT)
+   SET @SQL_Text = 'DBCC INPUTBUFFER(' + cast(@SPID as varchar)+ ')'
+
+   Insert Into #INPUT	
+   EXEC (@SQL_Text)
+	
+   Update @Process
+   SET SQL_Statements = (Select SQL_Text from #INPUT)
+   Where IDT = @CNT
+
+   Truncate table #INPUT	
+
+   SET @CNT = @CNT +  1
+
+END
+
+Select Long_Process_Threshold, Current_Run_Time, SPID, [Program_Name], Login_Time, Last_Batch, SQL_Statements from @Process
+
+DROP TABLE #INPUT
