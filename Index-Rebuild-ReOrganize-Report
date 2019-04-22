@@ -1,0 +1,53 @@
+--http://sqltouch.blogspot.com/2013/07/index-optimization-rebuild-and.html
+
+select  schema_name(o.schema_id) as [schema_name] ,
+        object_name(o.object_id) as [table_name] ,
+        i.name as [index_name] ,
+        i.type_desc as [index_type] ,
+        dmv.page_count ,
+        dmv.fragment_count ,
+        round(dmv.avg_fragment_size_in_pages, 2, 2) [avg_fragment_size_in_pages] ,
+        round(dmv.avg_fragmentation_in_percent, 2, 2) [avg_fragmentation_in_percent] ,
+        case when dmv.avg_fragmentation_in_percent <= 5 then 'RELAX'
+             when dmv.avg_fragmentation_in_percent <= 30 then 'REORGANIZE'
+             when dmv.avg_fragmentation_in_percent > 30 then 'REBUILD'
+        end as [action] ,
+        stats_date(dmv.object_id, i.index_id) as stats_update_date ,
+        case when isnull(ps.function_id, 1) = 1 then 'NO'
+             else 'YES'
+        end as partitioned ,
+        coalesce(fg.name, fgp.name) as [file_group_name] ,
+        p.partition_number as [partition_number] ,
+        p.rows as [partition_rows] ,
+        prv_left.value as [partition_lower_boundary_value] ,
+        prv_right.value as [partition_upper_boundary_value] ,
+        case when pf.boundary_value_on_right = 1 then 'RIGHT'
+             when pf.boundary_value_on_right = 0 then 'LEFT'
+             else 'NONE'
+        end as [partition_range] ,
+        pf.name as [partition_function] ,
+        ds.name as [partition_scheme]
+from    sys.partitions as p with ( readpast )
+        inner join sys.indexes as i with ( readpast ) on i.object_id = p.object_id
+                                                         and i.index_id = p.index_id
+        inner join sys.objects as o with ( readpast ) on o.object_id = i.object_id
+        inner join sys.dm_db_index_physical_stats(db_id(), null, null, null,
+                                                  N'LIMITED') dmv on dmv.OBJECT_ID =i.object_id
+                                                              and dmv.index_id =i.index_id
+                                                              and dmv.partition_number =p.partition_number
+        left join sys.data_spaces as ds with ( readpast ) on ds.data_space_id =i.data_space_id
+        left join sys.partition_schemes as ps with ( readpast ) on ps.data_space_id =ds.data_space_id
+        left join sys.partition_functions as pf with ( readpast ) on pf.function_id =ps.function_id
+        left join sys.destination_data_spaces as dds with ( readpast ) ondds.partition_scheme_id = ps.data_space_id
+                                                              and dds.destination_id =p.partition_number
+        left join sys.filegroups as fg with ( readpast ) on fg.data_space_id =i.data_space_id
+        left join sys.filegroups as fgp with ( readpast ) on fgp.data_space_id =dds.data_space_id
+        left join sys.partition_range_values as prv_left with ( readpast ) onps.function_id = prv_left.function_id
+                                                              and prv_left.boundary_id =p.partition_number
+                                                              - 1
+        left join sys.partition_range_values as prv_right with ( readpast ) onps.function_id = prv_right.function_id
+                                                              and prv_right.boundary_id= p.partition_number
+where   objectproperty(p.object_id, 'ISMSShipped') = 0
+order by [avg_fragmentation_in_percent] DESC,
+        [table_name] ,
+        [index_name]
