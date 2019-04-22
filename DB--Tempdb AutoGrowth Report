@@ -1,0 +1,232 @@
+
+--https://thesqlguy.wordpress.com/2011/01/01/detect-when-your-tempdb-files-have-grown-2/
+
+--tempdb - Show files info with initial tempdb size integrated
+ 
+USE [master]
+ 
+IF OBJECT_ID('tempdb..#data') IS NULL
+    CREATE TABLE #data(
+    dbname VARCHAR(300),
+    dbcompat VARCHAR(10),
+    Fileid int NOT NULL,
+    [FileGroup] int NOT NULL,
+    TotalExtents int NOT NULL,
+    UsedExtents int NOT NULL,
+    [Name] sysname NOT NULL,
+    [FileName] varchar(300) NOT NULL,
+    FilePath VARCHAR(500) NULL,
+    Autogrowth   VARCHAR(500) NULL
+)
+ 
+IF OBJECT_ID('tempdb..#log') IS NULL
+CREATE TABLE #log(
+    id int identity(1,1) not null,
+    groupid INT DEFAULT 0 NULL,
+    dbname sysname NOT NULL,
+    dbcompat VARCHAR(10),
+    LogSize numeric(38,7) NOT NULL,
+    LogUsed numeric(38,6) NOT NULL,
+    Status int NOT NULL,
+    [Name] VARCHAR(300) NULL,
+    FilePath VARCHAR(500) NULL,
+    Autogrowth   VARCHAR(500) NULL
+)
+ 
+USE [tempdb] 
+ 
+INSERT #data (Fileid, FileGroup, TotalExtents, UsedExtents, Name, FileName)
+EXEC('DBCC showfilestats with no_infomsgs') 
+ 
+UPDATE #data SET dbname = 'tempdb'
+WHERE dbname IS NULL
+ 
+UPDATE #data
+SET [FilePath] = s.filename,
+Autogrowth = 'Autogrowth: '
++
+CASE
+    WHEN (s.status & 0x100000 = 0 AND CEILING((s.growth * 8192.0)/(1024.0*1024.0)) = 0.00)
+        OR s.growth = 0 THEN 'None'
+    WHEN s.status & 0x100000 = 0 THEN 'By ' + CONVERT(VARCHAR,CEILING((s.growth * 8192.0)/(1024.0*1024.0))) + ' MB'
+    ELSE 'By ' + CONVERT(VARCHAR, s.growth) + ' percent' END
++
+CASE
+    WHEN (s.status & 0x100000 = 0 AND CEILING((s.growth * 8192.0)/(1024.0*1024.0)) = 0.00)
+        OR s.growth = 0 THEN ''
+    WHEN CAST([maxsize]*8.0/1024 AS DEC(20,2)) <= 0.00 THEN ', unrestricted growth'
+    ELSE ', restricted growth to ' + CAST(CAST([maxsize]*8.0/1024 AS DEC(20)) AS VARCHAR) + ' MB'
+END
+FROM #data d
+INNER JOIN dbo.sysfiles s
+ON d.FileGroup = s.groupid AND d.Fileid = s.fileid
+WHERE d.dbname = 'tempdb'
+ 
+USE [tempdb];
+INSERT #log
+(
+    dbname,
+    LogSize,
+    LogUsed,
+    Status
+)
+EXEC('DBCC sqlperf(logspace) with no_infomsgs');
+INSERT #log
+(
+    dbname,
+    [groupid],
+    LogSize,
+    LogUsed,
+    Status,
+    [Name]
+)
+SELECT
+    'tempdb',
+    [s].[groupid],
+    s.[size] * 0.0078125 AS [size],
+    0,
+    0,
+    [name]
+FROM dbo.sysfiles s
+WHERE [groupid] = 0;
+ 
+USE [tempdb];
+ 
+UPDATE #log
+SET [#log].[LogUsed] = b.[LogUsed]
+FROM [#log] t
+INNER JOIN
+ ( SELECT
+        [l].[dbname],
+        [LogUsed]
+    FROM #log l
+    LEFT JOIN
+        ( SELECT dbname,
+        Name,
+        MIN(id) AS id
+        FROM #log
+        GROUP BY dbname,
+        Name
+        ) k
+    ON l.dbname = k.dbname
+    AND l.Name = k.Name
+    AND l.id = k.id
+    WHERE k.id IS NULL
+    )
+    AS b
+    ON [t].[dbname] = [b].[dbname];
+ 
+DELETE #log
+WHERE Name IS NULL;
+ 
+USE [master];
+UPDATE #log
+SET [Name] = s.name,
+[FilePath] = s.filename,
+Autogrowth = 'Autogrowth: ' +
+CASE
+    WHEN
+    (
+    s.status & 0x100000 = 0
+    AND CEILING((s.growth * 8192.0)/(1024.0*1024.0)) = 0.00
+    )
+    OR s.growth = 0
+    THEN 'None'
+    WHEN s.status & 0x100000 = 0
+    THEN 'By ' + CONVERT(VARCHAR,CEILING((s.growth * 8192.0)/(1024.0*1024.0))) + ' MB'
+    ELSE 'By ' + CONVERT(VARCHAR, s.growth) + ' percent'
+END +
+CASE
+    WHEN
+    (
+    s.status & 0x100000 = 0
+    AND CEILING((s.growth * 8192.0)/(1024.0*1024.0)) = 0.00
+    )
+    OR s.growth = 0
+    THEN ''
+    WHEN CAST([maxsize]*8.0/1024 AS DEC(38,7)) <= 0.00
+    THEN ', unrestricted growth'
+    ELSE ', restricted growth to ' + CAST(CAST([maxsize]*8.0/1024 AS DEC(38,7)) AS VARCHAR) + ' MB'
+END
+FROM #log l
+INNER JOIN [tempdb].dbo.sysfiles s
+    ON l.groupid = s.groupid
+    AND l.[Name] COLLATE DATABASE_DEFAULT = s.[name] COLLATE DATABASE_DEFAULT
+WHERE l.dbname = 'tempdb';
+ 
+--SELECT * FROM [#data]
+--SELECT * FROM [#log] WHERE dbname = 'tempdb'
+ 
+SELECT
+DB_Name,
+[Type],
+[Name],
+[FilePath],
+init_size_MB,
+[CurrTotalMB],
+tempdb_growth_MB =
+CASE
+    WHEN [CurrTotalMB] - init_size_MB < 0 THEN 0
+    ELSE [CurrTotalMB] - init_size_MB
+END,
+UsedMB,
+FreeMB,
+Autogrowth
+FROM
+(
+SELECT
+    dbname AS [DB_Name],
+    'Data File' AS [Type],
+    [Name] AS [Name],
+    [FilePath],
+    init_size_MB = a.Initial_Size_MB,
+    (TotalExtents*64)/1024.0 AS [CurrTotalMB],
+    (UsedExtents*64)/1024.0 AS [UsedMB],
+    (TotalExtents*64)/1024.0 - (UsedExtents*64)/1024.0 AS [FreeMB],
+    [Autogrowth]
+FROM #data d
+    INNER JOIN
+    (
+        SELECT
+            [DB_Name] = 'tempdb',
+            f.[name] AS logical_file_Name,
+            (CAST(f.[size] AS DECIMAL) * 8192) / 1024 /1024 AS Initial_Size_MB
+        FROM master..sysaltfiles f
+            INNER JOIN master..sysdatabases d
+            ON f.dbid = d.dbid
+        WHERE d.name = 'tempdb') AS a
+    ON d.dbname = a.[DB_Name]
+    AND d.[Name] = a.logical_file_Name
+WHERE [dbname] = 'tempdb'
+UNION
+SELECT
+    dbname AS [DB_Name],
+    'TLog File',
+    [Name] AS [NAME],
+    [FilePath],
+    init_size_MB = a.Initial_Size_MB,
+    LogSize,
+    ((LogUsed/100)*LogSize),
+    LogSize - ((LogUsed/100)*LogSize),
+    [Autogrowth]
+FROM #log l
+    INNER JOIN
+    (
+        SELECT
+            [DB_Name] = 'tempdb',
+            f.[name] AS logical_file_Name,
+            (CAST(f.[size] AS DECIMAL) * 8192) / 1024 /1024 AS Initial_Size_MB
+        FROM master..sysaltfiles f
+            INNER JOIN master..sysdatabases d
+            ON f.dbid = d.dbid
+        WHERE d.name = 'tempdb') AS a
+    ON l.dbname = a.[DB_Name]
+    AND l.[Name] = a.logical_file_Name
+WHERE [dbname] = 'tempdb'
+) AS r
+ORDER BY 1, [Type], [Name]
+ 
+IF OBJECT_ID('tempdb..#data') IS NOT NULL
+DROP TABLE [#data]
+IF OBJECT_ID('tempdb..#log') IS NOT NULL
+DROP TABLE [#log]
