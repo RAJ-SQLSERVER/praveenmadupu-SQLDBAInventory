@@ -1,0 +1,41 @@
+select @@servername
+go
+select
+	[OS Start Time]	= convert(varchar(23),b.OS_Start,121),
+	[SQL Server Start Time]	= convert(varchar(23),a.SQL_Start,121),
+	[SQL Agent Start Time]	= convert(varchar(23),a.Agent_Start,121),
+	[OS Uptime] =
+		convert(varchar(15),
+		right(10000000+datediff(dd,0,getdate()-b.OS_Start),4)+' '+
+		convert(varchar(20),getdate()-b.OS_Start,108)),
+	[SQL Uptime] =
+		convert(varchar(15),
+		right(10000000+datediff(dd,0,getdate()-a.SQL_Start),4)+' '+
+		convert(varchar(20),getdate()-a.SQL_Start,108)) ,
+	[Agent Uptime] =
+		convert(varchar(15),
+		right(10000000+datediff(dd,0,getdate()-a.Agent_Start),4)+' '+
+		convert(varchar(20),getdate()-a.Agent_Start,108))
+from
+	(
+	Select
+		SQL_Start = min(aa.login_time),
+		Agent_Start =
+		nullif(min(case when aa.program_name like 'SQLAgent %' then aa.login_time else '99990101' end),
+			convert(datetime,'99990101'))
+	from
+		master.dbo.sysprocesses aa
+	where
+		aa.login_time > '20000101'
+	) a
+	cross join
+	(
+	select
+		OS_Start = dateadd(ss,bb.[ms_ticks]/-1000,getdate())
+	from
+		sys.[dm_os_sys_info] bb
+	) b
+
+--http://www.sqlservercentral.com/Forums/Topic1384287-391-1.aspx
+
+
