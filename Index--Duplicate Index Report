@@ -1,0 +1,148 @@
+--TSQL Script to find Duplicate Indexes
+/*
+Drop table #dupIndx 
+Drop table #temp
+Drop Table #Temp1 
+Drop Table #dupindx1
+Drop table #tempdet 
+select * from #dupIndx where object_name = 'MembersXMemberTypes'
+*/
+
+Drop table #dupIndx 
+Drop table #temp
+Drop Table #Temp1 
+Drop Table #dupindx1
+Drop table #tempdet 
+
+SELECT --SCH.schema_id
+SCH.[name] AS schema_name--, OBJS.[object_id]
+, OBJS.[name] AS object_name--, IDX.index_id
+, ISNULL(IDX.[name], '---') AS index_name
+, partitions.Rows, partitions.SizeMB --, IndexProperty(OBJS.[object_id], IDX.[name], 'IndexDepth') AS IndexDepth
+, IDX.type, IDX.type_desc--, IDX.fill_factor
+, IDX.is_unique, IDX.is_primary_key, IDX.is_unique_constraint
+, ISNULL(Index_Columns.index_columns_key, '---') AS index_columns_key
+, ISNULL(Index_Columns.index_columns_include, '---') AS index_columns_include 
+into #dupIndx
+FROM sys.objects OBJS 
+INNER JOIN sys.schemas SCH ON OBJS.schema_id=SCH.schema_id 
+INNER JOIN sys.indexes IDX ON OBJS.[object_id]=IDX.[object_id] 
+INNER JOIN ( 
+SELECT [object_id], index_id, SUM(row_count) AS Rows, 
+CONVERT(numeric(19,3), CONVERT(numeric(19,3), SUM(in_row_reserved_page_count+lob_reserved_page_count+row_overflow_reserved_page_count))/CONVERT(numeric(19,3), 128)) AS SizeMB 
+FROM sys.dm_db_partition_stats STATS 
+GROUP BY [object_id], index_id 
+) AS partitions 
+ON IDX.[object_id]=partitions.[object_id] 
+AND IDX.index_id=partitions.index_id 
+CROSS APPLY ( SELECT 
+LEFT(index_columns_key, LEN(index_columns_key)-1) AS index_columns_key, 
+LEFT(index_columns_include, LEN(index_columns_include)-1) AS index_columns_include 
+FROM 
+( 
+SELECT 
+( 
+SELECT COLS.[name] + ' ' + CASE WHEN IXCOLS.IS_DESCENDING_KEY = 0 THEN 'ASC' ELSE 'DESC' END + ',' + ' ' 
+FROM sys.index_columns IXCOLS 
+INNER JOIN sys.columns COLS 
+ON IXCOLS.column_id = COLS.column_id 
+AND IXCOLS.[object_id] = COLS.[object_id] 
+WHERE IXCOLS.is_included_column = 0 
+AND IDX.[object_id] = IXCOLS.[object_id] 
+AND IDX.index_id = IXCOLS.index_id 
+ORDER BY key_ordinal 
+FOR XML PATH('') 
+) AS index_columns_key, 
+( 
+SELECT COLS.[name] + ',' + ' ' 
+FROM sys.index_columns IXCOLS 
+INNER JOIN sys.columns COLS 
+ON IXCOLS.column_id = COLS.column_id 
+AND IXCOLS.[object_id] = COLS.[object_id] 
+WHERE 
+                IXCOLS.is_included_column = 1 
+AND IDX.[object_id] = IXCOLS.[object_id] 
+AND IDX.index_id = IXCOLS.index_id 
+ORDER BY index_column_id 
+FOR XML PATH('') 
+) AS index_columns_include 
+) AS Index_Columns 
+) AS Index_Columns 
+WHERE OBJS.TYPE = 'U' --and OBJS.[name] = 'MembersXMemberTypes' 
+AND IDX.TYPE > 0 
+ORDER BY SCH.[name], OBJS.[name], IDX.[name]
+Create table #Temp
+(Id int identity(1,1),
+schemaname varchar(50), Tablename varchar(50))
+Create Table #Temp1
+(Id int identity(1,1),
+schemaname varchar(50), Tablename varchar(50), Index_column_len int, index_columns_include int)
+Create Table #tempdet (index_columns_key varchar(2000), index_columns_include varchar(2000))
+Declare @cnt int, @Maxcnt int, @schemaname varchar(100), @tablename varchar(100)
+Declare @cnt1 int, @maxcnt1 int, @Index_column_len int, @index_columns_include_len int 
+Declare @Str varchar(5000), @index_column_key1 varchar(1000), @index_columns_include varchar(1000)
+INsert into #Temp (schemaname, Tablename)
+Select SCHEMA_NAME, OBJECT_NAME from #dupindx group by SCHEMA_NAME, OBJECT_NAME having COUNT(1) > 1
+Select @cnt =1, @Maxcnt = @@rowcount 
+Select top 0 *, convert(varchar(5),'Yes') DropIndexStatus into #dupindx1 from #dupindx 
+While @cnt <= @Maxcnt 
+begin 
+Truncate Table #Temp1
+Select @schemaname = '', @tablename = '', @Maxcnt1 = 0
+Select @schemaname = schemaname, @tablename = Tablename from #Temp where id = @cnt
+INsert into #Temp1(schemaname, Tablename, Index_column_len, index_columns_include)
+Select Distinct SCHEMA_NAME Schemaname, OBJECT_NAME TableName, 
+LEN(index_columns_key) Index_column_len , LEN(index_columns_include) index_columns_include 
+from #dupIndx a
+where SCHEMA_NAME = @schemaname and OBJECT_NAME = @tablename
+order by LEN(index_columns_key), LEN(index_columns_include)
+Select @cnt1 =1, @Maxcnt1 = @@rowcount 
+while @cnt1 <= @Maxcnt1
+begin
+Select @Index_column_len = 0, @index_columns_include_len = 0, @index_column_key1 = '', @index_columns_include = ''
+Select @Index_column_len = isnull(Index_column_len,0), @index_columns_include_len = isnull(index_columns_include,0)
+from #Temp1 
+where Id = @cnt1
+Truncate Table #tempdet 
+Select @Str = ' Insert into #Tempdet '
+Select @STr = @str + ' SElect index_columns_key, index_columns_include '
+Select @Str = @str + ' From #dupindx '
+Select @str = @str + 'where SCHEMA_NAME = ' + CHAR(39) + @schemaname + CHAR(39) + ' and OBJECT_NAME = ' + CHAR(39) + @tablename + char(39)
+Select @str = @str + ' and '
+Select @str = @str + ' LEN(index_columns_key) = ' + ltrim(rtrim(str(@Index_column_len))) + ' and LEN(index_columns_include) = ' + ltrim(rtrim(STR(@index_columns_include_len)))
+exec (@str) 
+--print @str 
+Select @index_column_key1 = index_columns_key , @index_columns_include = index_columns_include 
+from #tempdet 
+--Select @schemaname, @tablename, @Index_column_len, @index_columns_include_len, @index_column_key1, @index_columns_include
+declare @cntrec int
+select @cntrec = 0
+Select @cntrec = count(1) 
+From #dupindx a
+where a.SCHEMA_NAME = @schemaname and a.OBJECT_NAME = @tablename and 
+LEFT(a.index_columns_key,@Index_column_len) = @index_column_key1 and LEFT(a.index_columns_include,@index_columns_include_len) >= @index_columns_include
+if @cntrec > 1 
+begin 
+--Select @cntrec 
+insert into #dupindx1 
+Select a.* , 
+case when LEN(a.index_columns_key) = @Index_column_len and LEN(a.index_columns_include) = @index_columns_include_len 
+and a.is_primary_key = 0 and a.is_unique_constraint = 0 
+then 'Yes' else 'NO' end Delstatus
+From #dupindx a
+left join #dupindx1 b on a.SCHEMA_NAME = b.SCHEMA_NAME and a.object_Name = B.object_Name
+and a.index_columns_key = b.index_columns_key and a.index_columns_include = b.index_columns_include
+where a.SCHEMA_NAME = @schemaname and a.OBJECT_NAME = @tablename and 
+LEFT(a.index_columns_key,@Index_column_len) = @index_column_key1 and 
+LEFT(a.index_columns_include,@index_columns_include_len) = 
+                case when @index_columns_include_len <> 0 and @index_columns_include <> '---' then @index_columns_include 
+                else LEFT(a.index_columns_include,@index_columns_include_len) end
+--and b.schema_name is null 
+
+end 
+Select @cnt1 = @cnt1 + 1
+End
+Select @cnt = @cnt + 1
+End
+Select COUNT(1) Cnt, SUM(SizeMB) TotalSIzeMB From #dupindx1 where DropindexStatus = 'Yes'
+Select db_name() databasename , * From #dupindx1
