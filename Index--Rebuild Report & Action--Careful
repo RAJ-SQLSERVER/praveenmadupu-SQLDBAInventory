@@ -1,0 +1,89 @@
+--Reindexing for fragmented indexes
+--https://www.sqlservercentral.com/scripts/reindexing-for-fragmented-indexes
+--Please be careful while executing this script as it will start the reindexing.
+--First run the script till the cursors portion as the cursors are used to execute the reindex statements.
+--If the database size is small you can the run the entire script.
+--The two select statements in the script will provide you the list of indexes to rebuild and reorg.
+ set nocount on
+go
+----------Table to Hold Fragmented Objects----
+create table #Reorganize       
+(Schemaname varchar(50),
+tablename varchar(50),
+Indexname varchar(150),
+Fragmentation float)
+go
+create table #Rebuild      
+(Schemaname varchar(50),
+tablename varchar(50),
+Indexname varchar(150),
+Fragmentation float)
+go
+-----------Inserting All fragmented table where fragmentation level is between 5 to 30 in temptable----
+insert into #reorganize(Schemaname,tablename,Indexname,Fragmentation)
+ 
+select s.name,o.name,i.name,ips.avg_fragmentation_in_percent from sys.objects o left outer join sys.schemas s on
+o.schema_id= s.schema_id  left outer join sys.indexes i on
+o.object_id=i.object_id left outer join sys.dm_db_index_physical_stats (db_id(), NULL, NULL, NULL, NULL) AS IPS
+on i.object_id=IPS.object_id and i.index_id=ips.index_id
+where o.type='U' and i.index_id > 0 and avg_fragmentation_in_percent between 5and 30
+go
+insert into #Rebuild(Schemaname,tablename,Indexname,Fragmentation)
+ 
+select s.name,o.name,i.name,ips.avg_fragmentation_in_percent from sys.objects o left outer join sys.schemas s on
+o.schema_id= s.schema_id  left outer join sys.indexes i on
+o.object_id=i.object_id left outer join sys.dm_db_index_physical_stats (db_id(), NULL, NULL, NULL, NULL) AS IPS
+on i.object_id=IPS.object_id and i.index_id=ips.index_id
+where o.type='U' and i.index_id > 0 and avg_fragmentation_in_percent > 30
+ 
+ --=================================================================================================================
+--Run below only when you want to REORGANIZE Indexes 
+
+-----------Cursor for reorganize---------------------
+Declare @cmd varchar(1000)
+DECLARE @Iname varchar(250)
+DECLARE @Jname varchar(250)
+declare @sname varchar(150)
+declare @tname varchar(150)
+DECLARE db_reindex CURSOR for
+select  indexname,[SCHEMANAME],tablename from #Reorganize
+OPEN db_reindex
+FETCH NEXT from db_reindex into @Iname,@sname,@tname
+WHILE @@FETCH_STATUS = 0
+BEGIN
+set @Jname= @sname + '.'+  @tname
+set @cmd= 'Alter INdex ' + @Iname + ' on '+ @Jname + ' reorganize'
+execute (@cmd)
+FETCH NEXT from db_reindex into @iname,@sname,@tname
+select 'Executed Reindex reorganize for ' + @Jname + ' '+ @Iname
+END
+CLOSE db_reindex
+DEALLOCATE db_reindex
+GO
+--=================================================================================================================
+--Run below only when you want to REBUILD Indexes 
+----------Cursor For Rebuild--------------
+Declare @cmd Varchar(1000)
+DECLARE @Iname varchar(250)
+DECLARE @Jname varchar(250)
+declare @sname varchar(150)
+declare @tname varchar(150)
+DECLARE db_reindex CURSOR for
+select  indexname,[SCHEMANAME],tablename from #Rebuild
+OPEN db_reindex
+FETCH NEXT from db_reindex into @Iname,@sname,@tname
+WHILE @@FETCH_STATUS = 0
+BEGIN
+set @Jname= @sname + '.'+  @tname
+set @cmd= 'Alter INdex ' + @Iname + ' on '+ @Jname + ' rebuild'
+execute (@cmd)
+FETCH NEXT from db_reindex into @iname,@sname,@tname
+select 'Executed Reindex rebuild for ' + @Jname + ' '+ @Iname
+END
+CLOSE db_reindex
+DEALLOCATE db_reindex
+GO
+------------Droping Temp Tables----
+drop table #Rebuild
+go
+Drop table #Reorganize
