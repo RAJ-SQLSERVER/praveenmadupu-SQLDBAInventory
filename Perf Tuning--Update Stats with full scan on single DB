@@ -1,0 +1,17 @@
+--
+
+USE DBNAME
+go
+DECLARE @sql nvarchar(MAX);
+SELECT @sql = (SELECT 'UPDATE STATISTICS ' +
+                      quotename(s.name) + '.' + quotename(o.name) +
+                      ' WITH FULLSCAN; ' AS [text()]
+               FROM   sys.objects o
+               JOIN   sys.schemas s ON o.schema_id = s.schema_id
+               WHERE  o.type = 'U'
+               FOR XML PATH(''), TYPE).value('.', 'nvarchar(MAX)');
+PRINT @sql
+EXEC (@sql)
+
+--Reference: 
+--https://social.msdn.microsoft.com/Forums/sqlserver/en-US/f0692fe1-f2e1-4cb9-9fdb-0cf27077bc39/update-stats-with-full-scan-on-database?forum=transactsql
