@@ -26,3 +26,18 @@ and (select max(rowcnt) from sysindexes i2 where i.id = i2.id and i2.indid < 2) 
 
 --Reference
 --https://troubleshootingsql.com/2010/01/22/how-to-check-database-statistics-last-updated-date-time-in-sql-server/
+===========================================================
+--For SQL 2000
+
+SELECT 'Index Name' = i.name, 'Table Name' = o.name,
+'Statistics Date' = STATS_DATE(i.id, i.indid)
+FROM sysobjects o, sysindexes i
+where o.id = i.id
+=================================================================
+--For SQL 2005/SQL 2008
+select a.id as 'ObjectID', isnull(a.name,'Heap') as 'IndexName', b.name as 'TableName',
+stats_date (id,indid) as stats_last_updated_time
+from sys.sysindexes as a
+inner join sys.objects as b
+on a.id = b.object_id
+where b.type = 'U'
