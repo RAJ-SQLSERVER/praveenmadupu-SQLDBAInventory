@@ -1,0 +1,27 @@
+--=====================================================================================
+-- looking at all databases to find a stored procedure named @spName
+-- marcelo miorelli
+-- 1-april-2014
+--=====================================================================================
+DECLARE @SQL NVARCHAR(max)
+    ,@spName VARCHAR(100) = 'usp_sel_CAEval4_comments' -- THE PROCEDURE THAT I AM LOOKING FOR
+
+SELECT @SQL = STUFF((
+            SELECT CHAR(10) + ' UNION ALL '           + CHAR(10) +  
+' SELECT ' + quotename(NAME, '''') + ' AS DB_NAME '   + CHAR(10) + 
+'         , SCHEMA_NAME(s.schema_id)  AS THE_SCHEMA ' + CHAR(10) + 
+'         , s.name  COLLATE Latin1_General_CI_AS AS THE_NAME  ' + CHAR(10) + 
+'  FROM ' + quotename(NAME) + '.sys.procedures s '    + CHAR(10) +   
+' WHERE s.name = @spName 
+  AND s.[type] = ''P'''
+            FROM sys.databases
+            ORDER BY NAME
+            FOR XML PATH('')
+                ,TYPE
+            ).value('.', 'nvarchar(max)'), 1, 11, '')
+
+--PRINT @SQL
+
+EXECUTE sp_executeSQL @SQL
+    ,N'@spName varchar(100)'
+    ,@spName
