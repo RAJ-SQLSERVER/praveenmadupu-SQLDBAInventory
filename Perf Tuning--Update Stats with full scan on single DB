@@ -15,3 +15,33 @@ EXEC (@sql)
 
 --Reference: 
 --https://social.msdn.microsoft.com/Forums/sqlserver/en-US/f0692fe1-f2e1-4cb9-9fdb-0cf27077bc39/update-stats-with-full-scan-on-database?forum=transactsql
+
+==============================================
+--Referene: https://www.sqlservercentral.com/scripts/update-statistics-for-all-tables-in-any-db
+
+USE DBNAME -- Change desired database name here
+GO
+SET NOCOUNT ON
+GO
+DECLARE updatestats CURSOR FOR
+SELECT table_name FROM information_schema.tables
+	where TABLE_TYPE = 'BASE TABLE'
+OPEN updatestats
+
+DECLARE @tablename NVARCHAR(128)
+DECLARE @Statement NVARCHAR(300)
+
+FETCH NEXT FROM updatestats INTO @tablename
+WHILE (@@FETCH_STATUS = 0)
+BEGIN
+   PRINT N'UPDATING STATISTICS ' + @tablename
+   SET @Statement = 'UPDATE STATISTICS '  + @tablename + '  WITH FULLSCAN'
+   EXEC sp_executesql @Statement
+   FETCH NEXT FROM updatestats INTO @tablename
+END
+
+CLOSE updatestats
+DEALLOCATE updatestats
+GO
+SET NOCOUNT OFF
+GO
