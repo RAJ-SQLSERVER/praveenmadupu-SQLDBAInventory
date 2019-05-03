@@ -1,0 +1,126 @@
+--Size Of Each Folder In a Path
+Execute it :=
+EXEC [usp_Folder_Size_Check] @command = 'c:\users\public\'
+Change the @command path at your convenience.
+The primary benefit of the script is that if you want to check the size of the backups files accumulated in a day 
+you can calculate and underatand how much can be the disk space which you want to allocate to retain a worth of 3- 4 of backup files.
+
+USE [DB_Maint]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF OBJECT_ID(N'[dbo].[usp_Folder_Size_Check]') IS NOT NULL
+BEGIN
+  DROP PROCEDURE [dbo].[usp_Folder_Size_Check]
+END
+GO
+
+CREATE PROC [dbo].[usp_Folder_Size_Check] (@command sysname = 'c:\users\public')
+
+/*
+
+RUN : EXEC [usp_Folder_Size_Check] @command = 'c:\users\public\'
+
+
+
+*/
+
+AS
+BEGIN
+BEGIN TRY
+set nocount on
+
+declare @curdir nvarchar(400)
+declare @line varchar(400)
+--declare @command varchar(400)
+declare @counter int
+
+If (select count (*) from sys.objects where name='Output') <> 0 DROP TABLE output  
+If (select count (*) from tempdb.sys.objects where name like '%#Tempoutput%') <> 0 DROP TABLE #Tempoutput   
+If (select count (*) from tempdb.sys.objects where name like '%#dirs%') <> 0 DROP TABLE #dirs   
+
+create table #dirs (DIRID int identity(1,1), directory varchar(400))
+  Set @command = 'dir "' + @command + '"'+ '  /S/O/B/A:D'
+  --Print @command
+ insert into #dirs exec xp_cmdshell @command
+  set @counter = (select count(*) from #dirs)
+create table #tempoutput (line nvarchar(4000))
+create table output (Directory nvarchar(4000), FileSize bigint)
+    While @Counter <> 0
+      Begin
+        Declare @filesize bigint
+        set @curdir = (select directory from #dirs where DIRID = @counter)
+        set @command = 'dir "' + @curdir +'"'
+        insert into #tempoutput
+        exec master.dbo.xp_cmdshell @command
+           select @line = ltrim(replace(substring(line, charindex(')', line)+1,len(line)), ',', ''))
+           from #tempoutput where line like '%File(s)%bytes'
+           Set @filesize  = Replace(@line, ' bytes', '')
+        Insert into output (directory, Filesize) values (@curdir, @filesize)
+        Set @counter = @counter -1
+       End
+       Delete from output where Directory is null
+
+select Directory, FileSize as FileSize_Bytes, FileSize/1024 AS FileSize_KB,  FileSize/1024/1024 AS FileSize_MB from output
+Order by FileSize desc
+
+-- Cleanups
+
+drop table #dirs
+drop table #tempoutput
+
+  END TRY
+  BEGIN CATCH
+    DECLARE @ErrorNumber int;
+    DECLARE @ErrorSeverity int;
+    DECLARE @ErrorState int;
+    DECLARE @ErrorLine int;
+    DECLARE @ErrorProcedure nvarchar(4000);
+    DECLARE @ErrorMessage nvarchar(4000);
+
+    SELECT
+      @ErrorNumber = ERROR_NUMBER(),
+      @ErrorSeverity = ERROR_SEVERITY(),
+      @ErrorState = ERROR_STATE(),
+      @ErrorLine = ERROR_LINE(),
+      @ErrorProcedure = ERROR_PROCEDURE();
+
+    SELECT
+      @ErrorMessage =
+      N'Error %d, Level %d, State %d, Procedure %s, Line %d, '
+      + 'Message: ' + ERROR_MESSAGE();
+
+    SELECT
+      @ErrorMessage AS [Error_Message];
+
+    SELECT
+      @ErrorProcedure AS [Error_Procedure];
+
+    PRINT 'Error '
+    + CONVERT(varchar(50), ERROR_NUMBER())
+    + ', Severity '
+    + CONVERT(varchar(5), ERROR_SEVERITY())
+    + ', State '
+    + CONVERT(varchar(5), ERROR_STATE())
+    + ', Procedure '
+    + ISNULL(ERROR_PROCEDURE(), '-') + ', Line '
+    + CONVERT(varchar(5), ERROR_LINE());
+
+    PRINT ERROR_MESSAGE();
+  END CATCH
+
+  SET NOCOUNT OFF
+END
+
+GO
+
+SET ANSI_NULLS OFF
+GO
+
+SET QUOTED_IDENTIFIER OFF
+GO
