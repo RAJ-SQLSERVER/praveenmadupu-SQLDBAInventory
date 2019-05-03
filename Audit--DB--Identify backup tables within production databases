@@ -1,0 +1,27 @@
+--Identify backup tables within production databases
+
+use DB Name
+go
+DECLARE @dbname VARCHAR(60)   
+	DECLARE @dbid INT 
+	DECLARE @execmd VARCHAR(5000)   
+	DECLARE db CURSOR FAST_FORWARD FOR    
+
+	SELECT dbid, DB_NAME(dbid) AS name FROM master.dbo.sysdatabases WHERE name NOT IN ('master','TempDB', 'msdb', 'model','tempdb')   
+	OPEN db    
+		---2. Ensuring that the Cursor fetches data into the correct parameters
+		FETCH NEXT FROM db INTO @dbid, @dbname 
+		   WHILE @@Fetch_status=0 
+			   BEGIN
+				   SET @execmd='SELECT * FROM [' + @dbname +'].[INFORMATION_SCHEMA].[TABLES] WHERE Table_Name like ''%201%'' '
+				   SET @execmd=@execmd+' UNION '+  'SELECT * FROM [' + @dbname +'].[INFORMATION_SCHEMA].[TABLES] WHERE Table_Name like ''%ClientConv%Backup%'''
+				   SET @execmd=@execmd+' UNION '+  'SELECT * FROM [' + @dbname +'].[INFORMATION_SCHEMA].[TABLES] WHERE Table_Name like ''%Backup'''
+				   SET @execmd=@execmd+' UNION '+  'SELECT * FROM [' + @dbname +'].[INFORMATION_SCHEMA].[TABLES] WHERE CHARINDEX(''TEMP'',Table_Name,0) <> 0'
+				   print @execmd
+				   EXEC (@execmd) 
+
+				  --BREAK
+				 FETCH NEXT FROM db INTO @dbid, @dbname  
+				END
+	CLOSE db    
+	DEALLOCATE db
