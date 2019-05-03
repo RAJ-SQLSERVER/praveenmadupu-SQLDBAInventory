@@ -1,0 +1,62 @@
+
+
+IF EXISTS(SELECT * FROM sysobjects WHERE id = OBJECT_ID(N'[dbo].[usp_ShowOrphanUsers]') AND OBJECTPROPERTY(id,N'IsProcedure')= 1)
+
+DROP PROCEDURE [dbo].[usp_ShowOrphanUsers]
+GO
+CREATE PROC dbo.usp_ShowOrphanUsers
+AS
+BEGIN
+
+CREATETABLE #Results
+(
+[Database Name] sysname,
+[Orphaned User] sysname,
+[Type User] sysname
+)
+
+SET NOCOUNTON
+
+DECLARE @DBName sysname, @Qry NVARCHAR(4000)
+SET @Qry = ”SET @DBName =”
+
+WHILE
+@DBName ISNOT NULL
+BEGIN
+
+SET @DBName = ( SELECT MIN(name) FROM master..sysdatabases
+WHERE name NOT IN ('master','model','tempdb','msdb','distribution','pubs','northwind','dba_database')
+AND
+DATABASEPROPERTY(name,'IsOffline')= 0
+AND
+DATABASEPROPERTY(name,'IsSuspect')= 0
+AND name > @DBName )
+
+IF @DBName ISNULL
+BREAK
+SET @Qry =' SELECT ”'+ @DBName +”' AS [Database Name],
+CAST(name AS sysname) COLLATE Latin1_General_CI_AS AS [Orphaned User],
+[Type User] =  CASE isntuser
+WHEN ”0” THEN ”SQL User”
+WHEN ”1” THEN ”NT User”
+ELSE ”Not Available”
+END
+FROM ' +QUOTENAME(@DBName)+'..sysusers su
+WHERE su.islogin = 1
+AND su.name NOT IN (”INFORMATION_SCHEMA”, ”sys”, ”guest”, ”dbo”, ”system_function_schema”)
+AND NOT EXISTS (SELECT 1 FROM master..syslogins sl WHERE su.sid = sl.sid)'
+
+INSERT INTO #Results
+EXEC master..sp_executesql@Qry
+END
+
+SELECT * FROM #Results
+ORDER BY [Database Name], [Orphaned User]
+
+IF @@ROWCOUNT= 0
+PRINT 'No orphaned users exist in this server.'
+END
+GO
+
+–Execute the proc
+EXEC [dbo].[usp_ShowOrphanUsers]
