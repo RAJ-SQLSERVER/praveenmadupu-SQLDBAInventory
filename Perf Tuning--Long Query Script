@@ -1,0 +1,15 @@
+--Long Query Script
+use master
+go
+SELECT DISTINCT TOP 20
+	est.TEXT AS sql_queryText
+   ,DB_NAME(dbid)
+   ,eqs.execution_count AS sqltr_execCount
+   ,eqs.max_elapsed_time AS sqltr_maxelapsedTime
+   ,ISNULL(eqs.total_elapsed_time / NULLIF(eqs.execution_count, 0), 0) AS sqltr_avgElapsedTime
+   ,eqs.creation_time AS sqltr_CreatedTime
+   ,ISNULL(eqs.execution_count / NULLIF(DATEDIFF(s, eqs.creation_time, GETDATE()), 0), 0) AS sqltr_execPerSecond
+   ,total_physical_reads AS sqltr_agPhyRead
+FROM sys.dm_exec_query_stats eqs
+CROSS APPLY sys.dm_exec_sql_text(eqs.sql_handle) est
+ORDER BY eqs.max_elapsed_time DESC
