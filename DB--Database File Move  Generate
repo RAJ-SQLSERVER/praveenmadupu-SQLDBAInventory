@@ -1,0 +1,228 @@
+--DB--Database File Move  Generate
+--Deploy into master database
+--Run in the master database
+--Usage
+--@CommentCommands (Optional (Default 1)) 1 = Commands are commented, 0 = No comments (Easier to cut and paste)
+--@GenerateAttachDetach (Optional (Default 0)) 1 = Generates attach and detach commands, 0 = Does not generate commands
+--@DataPath & @TrnPath are the new paths for the relevant database files
+
+--EXEC generatefilemove 
+--@DataPath = 'D:\', 
+--@TrnPath = 'E:\',
+--@DatabaseName = '<DatabaseName>',
+--@CommentCommands = 0,
+--@GenerateAttachDetach = 0
+=======================================================
+-Deploy into master database
+--Run in the master database
+
+--Usage
+-- @CommentCommands (Optional (Default 1)) 1 = Commands are commented, 0 = No comments (Easier to cut and paste)
+-- @GenerateAttachDetach (Optional (Default 0)) 1 = Generates attach and detach commands, 0 = Does not generate commands
+-- @DataPath & @TrnPath are the new paths for the relevant database files
+-- EXEC generatefilemove @DataPath = 'D:\', @TrnPath = 'E:\',@DatabaseName = '<DatabaseName>',@CommentCommands = 0,@GenerateAttachDetach = 0
+
+
+IF EXISTS ( SELECT  *
+            FROM    sys.objects
+            WHERE   object_id = OBJECT_ID(N'[dbo].[GenerateFileMove]')
+                    AND type IN ( N'P', N'PC' ) ) 
+    DROP PROCEDURE [dbo].[GenerateFileMove]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+CREATE PROCEDURE [dbo].[GenerateFileMove]
+    (
+      @DataPath NVARCHAR(50) ,
+      @TrnPath NVARCHAR(50) ,
+      @DatabaseName NVARCHAR(50) ,
+      @CommentCommands BIT = 1 ,
+      @GenerateAttachDetach BIT = 0
+    )
+AS 
+    BEGIN
+        SET NOCOUNT ON
+        DECLARE @DatabaseID INT
+        DECLARE @AttachString NVARCHAR(MAX)
+        
+        SELECT  @DatabaseID = database_id
+        FROM    master.sys.databases AS d
+        WHERE   name = @DatabaseName
+        
+        IF @DatabaseID IS NULL 
+            BEGIN
+                SELECT  'Could not find the database you specified' AS 'A friendly message'
+                RETURN
+            END
+        
+        IF ( SELECT COUNT(*)
+             FROM   sys.master_files AS mf
+             WHERE  RIGHT(physical_name,
+                          CHARINDEX('\', REVERSE(physical_name)) - 1) IN (
+                    SELECT  RIGHT(physical_name,
+                                  CHARINDEX('\', REVERSE(physical_name)) - 1) AS DatabaseFile
+                    FROM    sys.master_files AS mf
+                    WHERE   database_id = @DatabaseID )
+                    AND mf.database_id <> @DatabaseID
+           ) > 0 
+            BEGIN
+                SELECT  'Another database has the same file names as '
+                        + UPPER(@DatabaseName) AS [You Really Should Read This Warning!!!]
+                UNION ALL
+                SELECT  'Exercise caution if moving these files to a new location'
+                UNION ALL
+                SELECT  'Consider renaming the files!!!'
+                UNION ALL
+                SELECT  'The database(s) in question are:'
+                UNION ALL
+                SELECT  DISTINCT
+                        DB_NAME(database_id)
+                FROM    sys.master_files AS mf
+                WHERE   RIGHT(physical_name,
+                              CHARINDEX('\', REVERSE(physical_name)) - 1) IN (
+                        SELECT  RIGHT(physical_name,
+                                      CHARINDEX('\', REVERSE(physical_name))
+                                      - 1) AS DatabaseFile
+                        FROM    sys.master_files AS mf
+                        WHERE   database_id = @DatabaseID )
+                        AND mf.database_id <> @DatabaseID
+        
+            END
+        
+        IF @GenerateAttachDetach = 1 
+            BEGIN
+                SET @AttachString = CASE WHEN @CommentCommands = 1 THEN '-- '
+                                         ELSE ''
+                                    END + 'CREATE DATABASE [' + @DatabaseName
+                    + '] ON '
+
+                SELECT  @AttachString = @AttachString + DatabaseFile
+                FROM    ( SELECT    ROW_NUMBER() OVER ( ORDER BY FILE_ID ASC ) AS FileNumber ,
+                                    '( FILENAME = N'''
+                                    + CASE type
+                                        WHEN 0 THEN @DataPath
+                                        ELSE @TrnPath
+                                      END + RIGHT(physical_name,
+                                                  CHARINDEX('\',
+                                                            REVERSE(physical_name))
+                                                  - 1) + ''' ),' AS DatabaseFile
+                          FROM      sys.master_files AS mf
+                          WHERE     database_id = @DatabaseID
+                        ) d
+                ORDER BY FileNumber ASC		
+            END
+            
+		
+        SELECT  '-------------------------------------------- ['
+                + UPPER(@DatabaseName)
+                + '] --------------------------------------------'
+        UNION ALL
+        SELECT  '-- Move to ' + @DataPath + ' Drive'
+        UNION ALL
+        SELECT  '-- ' + physical_name
+        FROM    sys.master_files
+        WHERE   database_id = @DatabaseID
+                AND type = 0
+        UNION ALL
+        SELECT  ''
+        UNION ALL
+        SELECT  '-- Move to ' + @TrnPath + ' Drive'
+        UNION ALL
+        SELECT  '-- ' + physical_name
+        FROM    sys.master_files
+        WHERE   database_id = @DatabaseID
+                AND type = 1
+        UNION ALL
+        SELECT  ''
+        UNION ALL
+        SELECT  CASE WHEN @CommentCommands = 1 THEN '-- '
+                     ELSE ''
+                END + 'ROBOCOPY "' + LEFT(physical_name,
+                                          LEN(physical_name) - CHARINDEX('\',
+                                                              REVERSE(physical_name)))
+                + '" "' + @DataPath + '" "' + RIGHT(physical_name,
+                                                    CHARINDEX('\',
+                                                              REVERSE(physical_name))
+                                                    - 1) + '" /Z /MOV /XO /XN'
+        FROM    sys.master_files
+        WHERE   database_id = @DatabaseID
+                AND type = 0
+        UNION ALL
+        SELECT  CASE WHEN @CommentCommands = 1 THEN '-- '
+                     ELSE ''
+                END + 'ROBOCOPY "' + LEFT(physical_name,
+                                          LEN(physical_name) - CHARINDEX('\',
+                                                              REVERSE(physical_name)))
+                + '" "' + @TrnPath + '" "' + RIGHT(physical_name,
+                                                   CHARINDEX('\',
+                                                             REVERSE(physical_name))
+                                                   - 1) + '" /Z /MOV /XO /XN'
+        FROM    sys.master_files
+        WHERE   database_id = @DatabaseID
+                AND type = 1
+        UNION ALL
+        SELECT  ''
+        UNION ALL
+        SELECT  CASE WHEN @CommentCommands = 1 THEN '-- '
+                     ELSE ''
+                END + 'ALTER DATABASE [' + DB_NAME(database_id)
+                + '] MODIFY FILE (NAME = [' + name + '], FILENAME = '''
+                + @DataPath + RIGHT(physical_name,
+                                    CHARINDEX('\', REVERSE(physical_name)) - 1)
+                + ''')'
+        FROM    sys.master_files
+        WHERE   database_id = @DatabaseID
+                AND type = 0
+        UNION ALL
+        SELECT  CASE WHEN @CommentCommands = 1 THEN '-- '
+                     ELSE ''
+                END + 'ALTER DATABASE [' + DB_NAME(database_id)
+                + '] MODIFY FILE (NAME = [' + name + '], FILENAME = '''
+                + @TrnPath + RIGHT(physical_name,
+                                   CHARINDEX('\', REVERSE(physical_name)) - 1)
+                + ''')'
+        FROM    sys.master_files
+        WHERE   database_id = @DatabaseID
+                AND type = 1
+        UNION ALL
+        SELECT  ''
+        UNION ALL
+        SELECT  CASE WHEN @GenerateAttachDetach = 1 THEN '-- Detach Script --'
+                     ELSE ''
+                END
+        UNION ALL
+        SELECT  CASE WHEN @GenerateAttachDetach = 1
+                     THEN CASE WHEN @CommentCommands = 1 THEN '-- '
+                               ELSE ''
+                          END + 'ALTER DATABASE [' + @DatabaseName
+                          + '] SET  SINGLE_USER WITH ROLLBACK IMMEDIATE'
+                     ELSE ''
+                END
+        UNION ALL
+        SELECT  CASE WHEN @GenerateAttachDetach = 1
+                     THEN CASE WHEN @CommentCommands = 1 THEN '-- '
+                               ELSE ''
+                          END + 'EXEC master.dbo.sp_detach_db @dbname = N'''
+                          + @DatabaseName + ''''
+                     ELSE ''
+                END
+        UNION ALL
+        SELECT  ''
+        UNION ALL
+        SELECT  CASE WHEN @GenerateAttachDetach = 1 THEN '-- Attach Script --'
+                     ELSE ''
+                END
+        UNION ALL
+        SELECT  CASE WHEN @GenerateAttachDetach = 1
+                     THEN LEFT(@AttachString, LEN(@AttachString) - 1)
+                          + ' FOR ATTACH'
+                     ELSE ''
+                END
+		
+    END        
+GO
