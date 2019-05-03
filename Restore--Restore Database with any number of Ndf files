@@ -1,0 +1,181 @@
+--Restore Database with any number of Ndf files
+--https://www.sqlservercentral.com/scripts/restore-database-with-any-number-of-ndf-files
+
+Execute the code after passing databse name on which you want to restore and the path where your backup file being located.
+e.g exec  sp_restoredb N'mydatabase',N'D:\mydatabase.bak'
+Here mydatabase is the name of database on which you want to restore.
+D:\mydatabase.bak is the location of database backup  file to which you want to restore.
+
+=================================================================================
+
+USE [master]
+GO
+/****** Object:  StoredProcedure [dbo].[sp_restoredb]    Script Date: 09/23/2013 09:55:41 ******/
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[sp_restoredb]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [dbo].[sp_restoredb]
+GO
+/****** Author: Sanjeev Kumar, DBA Object:  StoredProcedure [dbo].[sp_restoredb]    Script Date: 09/23/2013 09:55:41 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+IF NOT EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[sp_restoredb]') AND type in (N'P', N'PC'))
+BEGIN
+EXEC dbo.sp_executesql @statement = N'
+/*
+exec  sp_restoredb N''mydatabase'',N''D:\mydatabase.bak''
+*/
+
+CREATE procedure [dbo].[sp_restoredb]
+@dbname nvarchar(1000),@path nvarchar(max) 
+as
+begin
+SET NOCOUNT ON;
+if object_id(''tempdb..#dbfilespath'')>0
+drop table #dbfilespath
+if object_id(''tempdb..#logicalfilenames'')>0
+drop table #logicalfilenames
+-------
+declare @mdf_physicalname nvarchar(max)
+declare @ldf_physicalname nvarchar(max)
+declare @sql1 nvarchar(max)
+declare @mdf_logicalname nvarchar(500)
+declare @ldf_logicalname nvarchar(500)
+declare @sql2 nvarchar(max)
+declare @sql3 nvarchar(max)
+declare @sql4 nvarchar(max)
+create table #dbfilespath(id bigint identity(1,1),physical_path nvarchar(max),type bit)
+CREATE TABLE #logicalfilenames
+(id INT IDENTITY(1,1),
+ LogicalName nvarchar(128), 
+ PhysicalName nvarchar(260), 
+ Type char(1), 
+ FileGroupName nvarchar(128), 
+ [Size] numeric(20,0), 
+ [MaxSize] numeric(20,0),
+Fileid bigint,
+createLSN numeric(25,0),
+DropLSN numeric(25,0),
+uniqueid uniqueidentifier,
+ReadOnlyLSN numeric(25,0),
+ReadWriteLSN numeric(25,0),
+BackupSizeInBytes bigint,
+SourceBlockSize int,
+FileGroupID int,
+LogGroupGUID uniqueidentifier,
+DifferentialBaseLSN numeric(25,0),
+DifferentialBaseGUID uniqueidentifier,
+IsReadOnly bit,
+IsPresent bit
+)
+
+CREATE TABLE #logicalfilenames1
+(
+ LogicalName nvarchar(128), 
+ PhysicalName nvarchar(260), 
+ Type char(1), 
+ FileGroupName nvarchar(128), 
+ [Size] numeric(20,0), 
+ [MaxSize] numeric(20,0),
+Fileid bigint,
+createLSN numeric(25,0),
+DropLSN numeric(25,0),
+uniqueid uniqueidentifier,
+ReadOnlyLSN numeric(25,0),
+ReadWriteLSN numeric(25,0),
+BackupSizeInBytes bigint,
+SourceBlockSize int,
+FileGroupID int,
+LogGroupGUID uniqueidentifier,
+DifferentialBaseLSN numeric(25,0),
+DifferentialBaseGUID uniqueidentifier,
+IsReadOnly bit,
+IsPresent bit
+)
+
+DECLARE @string NVARCHAR(MAX)
+
+SET @string=N''''
+SET @sql3=N''''
+
+SET @sql3= ''RESTORE DATABASE ['' + @dbname +''] from disk='' + '''''''' + @path + ''''''''+ '' with replace''
+insert into #dbfilespath(physical_path,type)
+select physical_name,type from sys.master_files
+where database_id=db_id(@dbname)
+ORDER BY TYPE,[file_id]
+set @sql1=''RESTORE FILELISTONLY FROM DISK =''+ '''''''' +@path +''''''''
+insert into #logicalfilenames1
+exec(@sql1)
+ insert into #logicalfilenames
+ 
+ SELECT LogicalName , 
+ PhysicalName , 
+ Type , 
+ FileGroupName, 
+ [Size] , 
+ [MaxSize] ,
+Fileid ,
+createLSN ,
+DropLSN ,
+uniqueid ,
+ReadOnlyLSN ,
+ReadWriteLSN ,
+BackupSizeInBytes ,
+SourceBlockSize ,
+FileGroupID ,
+LogGroupGUID ,
+DifferentialBaseLSN ,
+DifferentialBaseGUID ,
+IsReadOnly ,
+IsPresent 
+FROM #logicalfilenames1 
+ORDER BY type,Fileid 
+SET @string=N''''
+DECLARE @min BIGINT
+DECLARE @max BIGINT
+DECLARE @min_fileid BIGINT
+DECLARE @max_fileid BIGINT
+--SELECT * FROM #dbfilespath --tt
+--SELECT * FROM #logicalfilenames --tt
+SELECT  @min=MIN(id) FROM #dbfilespath WHERE TYPE=0
+SELECT @max= MAX(id) FROM #dbfilespath WHERE TYPE=0
+SELECT @min_fileid= MIN(id) FROM #logicalfilenames WHERE TYPE=''D''
+WHILE @min < = @max
+BEGIN
+	SET @mdf_physicalname=N''''
+	SET @mdf_logicalname=N''''
+	select @mdf_physicalname=physical_path from #dbfilespath where type=0 AND id=@min
+select @mdf_logicalname=logicalname from #logicalfilenames where type=''D'' AND id=@min_fileid
+
+select @string=@string + '', move '' 
+ +'''''''' + @mdf_logicalname +'''''''' + '' to '' +  '''''''' + 
+@mdf_physicalname +
+'''''''' 
+
+
+SELECT @min=MIN(id) FROM #dbfilespath WHERE TYPE=0 AND id > @min
+SELECT @min_fileid= MIN(id) FROM #logicalfilenames WHERE id > @min_fileid
+
+
+END
+select @sql3= @sql3 + @string
+
+set @sql2=''ALTER DATABASE [''+  @dbname +
+    ''] SET SINGLE_USER WITH ROLLBACK IMMEDIATE''
+exec(@sql2)
+select @ldf_physicalname=physical_path from #dbfilespath where type=1
+select @ldf_logicalname=logicalname from #logicalfilenames where type=''L''
+SELECT  @sql3=@sql3 +'', move '' + ''''''''+ @ldf_logicalname + '''''''' + '' to '' +  '''''''' + @ldf_physicalname + ''''''''
+EXEC(@sql3)
+set @sql4=''ALTER DATABASE ['' + @dbname + ''] SET MULTI_USER''
+exec(@sql4)
+if object_id(''tempdb..#dbfilespath'')>0
+drop table #dbfilespath
+if object_id(''tempdb..#logicalfilenames'')>0
+drop table #logicalfilenames
+if object_id(''tempdb..#logicalfilenames1'')>0
+drop table #logicalfilenames1
+end
+' 
+END
+GO
