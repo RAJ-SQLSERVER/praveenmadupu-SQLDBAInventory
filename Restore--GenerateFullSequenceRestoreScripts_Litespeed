@@ -1,0 +1,176 @@
+--Generate--Full--Sequence--RestoreScripts_Litespeed
+--Create this SP in Master Database
+--Call it from SQL Agent to create the squence on DR server.
+/*    ==Scripting Parameters==
+
+    Source Server Version : SQL Server 2008 R2 (10.50.6560)
+    Source Database Engine Edition : Microsoft SQL Server Enterprise Edition
+    Source Database Engine Type : Standalone SQL Server
+
+    Target Server Version : SQL Server 2008 R2
+    Target Database Engine Edition : Microsoft SQL Server Enterprise Edition
+    Target Database Engine Type : Standalone SQL Server
+*/
+
+
+/****** Object:  StoredProcedure [dbo].[GenerateFullSequenceRestoreScripts_Litespeed]    Script Date: 8/23/2018 1:08:51 PM ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+
+
+
+
+create PROCEDURE [dbo].[GenerateFullSequenceRestoreScripts_Litespeed] 
+@DBname VARCHAR(500) = null
+
+AS
+
+BEGIN
+SET NOCOUNT ON;  -- required because we're going to print T-SQL for the restores in the messages 'tab' of SSMS
+DECLARE @lastFullBackup INT 
+DECLARE @lastFullBackupPath VARCHAR(2000)
+DECLARE @lastDifferentialBackup INT
+DECLARE @lastDifferentialBackupPath VARCHAR(2000)
+DECLARE @Fulllastbackup DATETIME
+DECLARE @Difflastbackup DATETIME
+DECLARE @Loglastbackup DATETIME
+DECLARE @i INT 
+DECLARE @logBackupPath VARCHAR(1000)
+
+/* 
+
+		Author:				Harkamal Singh
+		CreateDate:			2014/06/02
+		Desc: 				Script created for Litespeed script generated for Restore purposes of any @DBname
+
+		*/
+
+	
+		-- remove temp object that might exist
+		IF OBJECT_ID('tempdb..#MSDBBackupHistory') IS NOT NULL
+		DROP TABLE #MSDBBackupHistory
+
+		CREATE TABLE #MSDBBackupHistory (
+		id INT
+		IDENTITY(1,1),
+		backup_start_date DATETIME,
+		backup_type CHAR(1),
+		physical_device_name VARCHAR(1000))
+
+		-- dump the last backup first in table
+		INSERT INTO #MSDBBackupHistory (backup_start_date, backup_type, physical_device_name)
+		SELECT BS.backup_start_date, BS.type, RTRIM(BMF.physical_device_name)
+		FROM msdb..backupset BS JOIN msdb..backupmediafamily BMF ON BMF.media_set_id=BS.media_set_id
+		WHERE BS.database_name = @DBName
+		ORDER BY BS.backup_start_date
+		
+		-- get the last Full backup info.
+		SET @lastFullBackup = (SELECT MAX(id) FROM #MSDBBackupHistory WHERE backup_type='D')
+		SET @lastFullBackupPath = (SELECT physical_device_name FROM #MSDBBackupHistory WHERE id=@lastFullBackup)
+
+		SELECT @Fulllastbackup = MAX(backup_finish_date)
+		FROM msdb.dbo.backupset
+		WHERE TYPE = 'D' AND database_name = @DBname
+
+		-- Restore the Full backup
+		PRINT '-- Latest Full Backup occured on: ' + CAST(@Fulllastbackup AS VARCHAR)
+		PRINT '-- Server: ' + CAST(@@SERVERNAME AS VARCHAR)
+		PRINT ''
+		PRINT 'USE MASTER'
+		PRINT 'GO'
+		PRINT 'ALTER DATABASE  '+ @DBNAME  +' SET  SINGLE_USER WITH ROLLBACK IMMEDIATE'
+		PRINT 'GO'
+		PRINT 'ALTER DATABASE  '+ @DBNAME  +' SET RESTRICTED_USER'
+		PRINT 'GO'
+		PRINT 'EXEC master.dbo.xp_restore_database @database=N''' + @DBName + ''''
+		PRINT ', @filename=''' + @lastFullBackupPath + ''''
+		PRINT ',@with= N''REPLACE'''
+
+		-- IF it's there's no backup (differential or log) after it, we set to 'with recovery'
+		IF (@lastFullBackup = (SELECT MAX(id) FROM #MSDBBackupHistory))
+
+		PRINT ', @with=''RECOVERY'';'
+		ELSE PRINT ', @with=''NORECOVERY'';'
+		PRINT ''
+
+
+		-- get the last Differential backup (it must be done after the last Full backup)
+		SET @lastDifferentialBackup = (SELECT MAX(id) FROM #MSDBBackupHistory WHERE backup_type='I' AND id > @lastFullBackup)
+		SET @lastDifferentialBackupPath = (SELECT physical_device_name FROM #MSDBBackupHistory WHERE id=@lastDifferentialBackup)
+
+				
+
+		-- when there's a differential backup after the last full backup create the restore T-SQL commands
+		IF (@lastDifferentialBackup IS NOT NULL)
+		BEGIN
+
+		----check when was the differential backup occured.
+		SELECT @Difflastbackup = MAX(backup_finish_date)
+		FROM msdb.dbo.backupset
+		WHERE TYPE = 'I' AND database_name = @DBname
+		--PRINT '-- Differential Backup occured: ' + CAST(@Difflastbackup AS VARCHAR)
+
+		-- Restore last diff. backup
+			PRINT 'EXEC master.dbo.xp_restore_database @database=N''' + @DBName + ''''
+			PRINT ', @filename=N''' + @lastDifferentialBackupPath + ''''
+			PRINT ', @with=''DIFFERENTIAL'''
+
+
+			-- If no backup made (differential or log) after it, set to 'with recovery'
+			IF (@lastDifferentialBackup = (SELECT MAX(id) FROM #MSDBBackupHistory))
+
+			PRINT ', @with=''RECOVERY'';'
+				ELSE
+			PRINT ', @with=''NORECOVERY'';'
+			PRINT ''
+		
+		END
+
+		-- construct the required TRANSACTION LOG restores
+		IF (@lastDifferentialBackup IS NULL)
+
+		-- no diff backup made?
+		-- search for log dumps after the last full
+		SET @i = @lastFullBackup +
+		1 
+		ELSE
+		-- search for log dumps after the last diff
+		SET @i = @lastDifferentialBackup +
+		1
+
+		-- script T-SQL restore commands from the log backup history
+		WHILE (@i <= (SELECT MAX(id) FROM #MSDBBackupHistory))
+		BEGIN
+
+		SET @logBackupPath = (SELECT physical_device_name FROM #MSDBBackupHistory WHERE id=@i)
+
+		PRINT 'EXEC master.dbo.xp_restore_log @database=N''' + @DBName + ''''
+			PRINT ', @filename=N''' + @logBackupPath + ''''
+			
+
+			-- it's the last transaction log, set to 'with recovery'
+			IF (@i = (SELECT MAX(id) FROM #MSDBBackupHistory))
+			PRINT ', @with=''RECOVERY'';'
+			ELSE
+			PRINT ', @with=''NORECOVERY'';'
+			
+		PRINT
+		'GO'
+		PRINT
+		''
+		-- try to find the next log entry
+		SET @i = @i + 1
+		
+		END
+
+		-- remove temp objects that exist
+		IF OBJECT_ID('tempdb..#MSDBBackupHistory') IS NOT NULL
+		DROP TABLE #MSDBBackupHistory
+
+END
+GO
