@@ -1,0 +1,76 @@
+--DB Integrity & Backup Report
+--Execute on a server to return information for each database in regards to backups and database integrity checks.
+--I normally combine this with my email report procedure as a schedule report on each server.
+
+DECLARE 
+	 @vcDBName		VARCHAR(200)
+	,@vcExec		VARCHAR(MAX)	
+
+CREATE TABLE ##dbinfo
+	(
+	 DBName			VARCHAR(100)
+	,ParentObject	VARCHAR(100)
+	,Object			VARCHAR(100)
+	,Field			VARCHAR(100)
+	,Value			VARCHAR(100)
+	)
+
+SET @vcExec = ''
+
+SELECT @vcExec = @vcExec+
+' 
+INSERT INTO ##dbinfo
+	(
+	 ParentObject
+	,Object
+	,Field
+	,Value
+	)
+EXEC(''DBCC DBINFO (['+name+']) WITH TABLERESULTS'')
+
+DELETE FROM ##dbinfo
+WHERE	Field <> ''dbi_dbccLastKnownGood''
+
+UPDATE ##dbinfo
+SET		DBName = '''+name+'''
+WHERE	DBName IS NULL
+'
+FROM sys.databases
+WHERE [state] = 0
+
+EXEC (@vcExec)
+
+SELECT 
+	 a.database_name
+	,a.FullBackupDate
+	,b.LogBackupDate
+	,sd.recovery_model_desc
+	,CASE
+		WHEN value = '1900-01-01 00:00:00.000'	THEN CAST('NeverRan'	AS VARCHAR)
+		WHEN DATEDIFF(d, value, GETDATE()) > 7	THEN CAST('NotCurrent'	AS VARCHAR)
+	 ELSE CAST('Current' AS VARCHAR)
+	 END AS CheckDBStatus
+FROM
+	(
+	SELECT
+		 database_name
+		,MAX(backup_finish_date) FullBackupDate
+	FROM msdb.dbo.backupset
+	WHERE TYPE = 'D'
+	GROUP BY database_name
+	) a
+LEFT OUTER JOIN 	
+	(
+	SELECT
+		 database_name
+		,MAX(backup_finish_date) LogBackupDate
+	FROM msdb.dbo.backupset
+	WHERE TYPE = 'L'
+	GROUP BY database_name
+	) b  
+ON a.database_name = b.database_name
+INNER JOIN sys.databases	sd ON sd.name	= a.database_name
+INNER JOIN ##dbinfo		db ON db.DBName	= a.database_name
+ORDER BY a.database_name
+
+DROP TABLE ##dbinfo
