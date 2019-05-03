@@ -1,0 +1,58 @@
+--LOG FILE GROWTH – FREE SPACE ALERT
+Our goal will be accomplished in only two steps,
+
+Creating a user defined stored procedure in your user database then,
+Creating a job with a Schedule to run that stored procedure how frequently you want to check the log space (you-decide).
+Below is the script to create stored procedure that sends out an e-mail alert when log fills out to certain value (it depends on your requirement). In my case if my log file is of total 60GB then I set the benchmark to 50 GB so that I can have some time to do some tactics to figure it out what transactions are making it to fill or some other reasons and take some precautions to avoid it. Benchmark is nothing but when you want to get an alert once log reaches to that value or size.
+
+Here is the script that helped me; hopefully it helps you I guess.
+=================================================================
+/*This procedure sends out an alert message when LOG SPACE is below a predefined value (benchmark).This procedure can be scheduled to run daily as per your requirement so that DBA can act quickly to address this issue.
+*/
+CREATE PROC [dbo].[usp_logspacealert]
+– Set value in MB at what free space you wants get alert
+@logspacebenchmark int = ’10240′–you can specify your own value
+AS
+IF EXISTS (SELECT * FROM tempdb..sysobjects
+WHERE id = object_id(N’[tempdb]..[#files_size]‘))
+DROP TABLE #files_size
+DECLARE @logfreespace INT
+DECLARE @AlertMessage VARCHAR(500)
+DECLARE @MailSubject VARCHAR(100)
+/* Populate #files_size with actual size of the file */
+SELECT
+a.file_id,
+LOGICAL_NAME = a.name,
+PHYSICAL_FILENAME = a.physical_name,
+FILEGROUP_NAME = b.name,
+FILE_SIZE_MB = CONVERT(DECIMAL(12,2),ROUND(a.size/128.000,2)),
+SPACE_USED_MB = CONVERT(DECIMAL(12,2),ROUND(FILEPROPERTY(a.name,’SpaceUsed’)/128.000,2)),
+FREE_SPACE_MB = CONVERT(DECIMAL(12,2),ROUND((a.size-FILEPROPERTY(a.name,’SpaceUsed’))/128.000,2))
+INTO #files_size
+FROM  sys.database_files a
+LEFT OUTER JOIN sys.data_spaces b
+ON a.data_space_id = b.data_space_id
+ 
+/*selecting only log free space as we require only that here*/
+SELECT @logfreespace = FREE_SPACE_MB
+FROM
+#files_size
+where LOGICAL_NAME = 'your log file name'
+IF @logfreespace <= @logspacebenchmark
+Begin
+SET @MailSubject = 'log free space is low on for database name on' + @@SERVERNAME
+SET @AlertMessage = 'LOG file name on ' + @@SERVERNAME + ' has only ' +  CAST(@logfreespace AS VARCHAR) + ' MB left. Please free up space on this drive.please check the log backup history may be job failed try to take manual backup of log or contact administrator. ‘
+– Send out email
+EXEC msdb.dbo.sp_send_dbmail —This for you
+@profile_name =  'firstname lastname'
+, @recipients  =  'username@mail.net'
+, @subject     =  @MailSubject
+, @body        =  @AlertMessage
+, @body_format = 'TEXT'
+EXEC msdb.dbo.sp_send_dbmail –This is for your manager or other responsible person
+@profile_name =  'firstname lastname'
+, @recipients  =  'username@mail.net'
+, @subject     =  @MailSubject
+, @body        =  @AlertMessage
+, @body_format = 'TEXT'
+End  DROP TABLE #files_size
