@@ -1,0 +1,20 @@
+--SQL Agent jobs that run SSIS packages
+use msdb
+go
+
+SELECT sp.[name] as packagename, 
+       sf.foldername,
+	   sj.jobname,
+	   sj.step_id,
+	   sj.command
+FROM sysssispackages sp
+JOIN sysssispackagefolders sf ON sp.folderid = sf.folderid
+JOIN (SELECT sj.[name] AS jobname, 
+	              sjs.step_id,
+	              RIGHT(LEFT(REPLACE(REPLACE(sjs.command,'"', ''), '\ /', ' /'), LEN(REPLACE(REPLACE(sjs.command,'"', ''), '\ /', ' /')) - (LEN(REPLACE(REPLACE(sjs.command,'"', ''), '\ /', ' /')) - CHARINDEX( '/', REPLACE(REPLACE(sjs.command,'"', ''), '\ /', ' /'), 5)) - 2),
+	                CHARINDEX('\', REVERSE(LEFT(REPLACE(REPLACE(sjs.command,'"', ''), '\ /', ' /'), LEN(REPLACE(REPLACE(sjs.command,'"', ''), '\ /', ' /')) - (LEN(REPLACE(REPLACE(sjs.command,'"', ''), '\ /', ' /')) - CHARINDEX( '/', REPLACE(REPLACE(sjs.command,'"', ''), '\ /', ' /'), 5)) - 2))) - 1) AS package_name,      
+	              sjs.command
+           FROM sysjobs sj
+           JOIN sysjobsteps sjs on sj.job_id = sjs.job_id
+           WHERE sjs.command LIKE '/DTS%' OR sjs.command LIKE '/SQL%') sj ON sp.[name] = sj.package_name
+ORDER BY sf.foldername, sp.[name], sj.step_id
