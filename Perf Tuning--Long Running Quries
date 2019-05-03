@@ -1,0 +1,98 @@
+--TSQL Scriot to fetch long running queries
+SELECT DISTINCT TOP 20
+est.TEXT AS QUERY ,
+Db_name(dbid),
+eqs.execution_count AS EXEC_CNT,
+eqs.max_elapsed_time AS MAX_ELAPSED_TIME,
+ISNULL(eqs.total_elapsed_time / NULLIF(eqs.execution_count,0), 0) AS AVG_ELAPSED_TIME,
+eqs.creation_time AS CREATION_TIME,
+ISNULL(eqs.execution_count / NULLIF(DATEDIFF(s, eqs.creation_time, GETDATE()),0), 0) AS EXEC_PER_SECOND,
+total_physical_reads AS AGG_PHYSICAL_READS
+FROM sys.dm_exec_query_stats eqs
+CROSS APPLY sys.dm_exec_sql_text( eqs.sql_handle ) est
+ORDER BY
+eqs.max_elapsed_time DESC
+===========================================================
+--high impact queries with sys.dm_exec_query_stats
+SELECT TOP 5
+t.text as 'SQL Text',
+st.execution_count ,
+ISNULL( st.total_elapsed_time / st.execution_count, 0 ) as 'AVG Excecution Time',
+st.total_worker_time / st.execution_count as 'AVG Worker Time',
+st.total_worker_time,
+st.max_logical_reads,
+st.max_logical_writes,
+st.creation_time,
+ISNULL( st.execution_count / DATEDIFF( second, st.creation_time, getdate()), 0 ) as 'Calls Per Second'
+FROM sys.dm_exec_query_stats st
+CROSS APPLY sys.dm_exec_sql_text( st.sql_handle )  t
+ORDER BY
+st.total_elapsed_time DESC
+==========================================================
+--sql queries matching wait types
+if exists (select * from sys.objects where object_id = object_id(N'[dbo].[get_statements_from_waiter_list]') and OBJECTPROPERTY(object_id, N'IsProcedure') = 1) 
+    drop procedure [dbo].[get_statements_from_waiter_list] 
+go 
+ 
+create proc get_statements_from_waiter_list (@wait_type nvarchar(60)=NULL) 
+as 
+select  
+        r.wait_type 
+        ,r.wait_time 
+        ,SUBSTRING(qt.text,r.statement_start_offset/2,  
+            (case when r.statement_end_offset = -1  
+            then len(convert(nvarchar(max), qt.text)) * 2  
+            else r.statement_end_offset end -r.statement_start_offset)/2)  
+        as query_text 
+        ,qt.dbid, dbname=db_name(qt.dbid) 
+        ,qt.objectid 
+        ,r.sql_handle 
+        ,r.plan_handle 
+FROM sys.dm_exec_requests r 
+cross apply sys.dm_exec_sql_text(r.sql_handle) as qt 
+where r.session_id > 50 
+  and r.wait_type = isnull(upper(@wait_type),r.wait_type) 
+go 
+ 
+exec get_statements_from_waiter_list
+================================================================================
+--Top Queries by Total CPU Time
+select top 10 rank() over(order by total_worker_time desc,sql_handle,statement_start_offset) as row_no
+,       (rank() over(order by total_worker_time desc,sql_handle,statement_start_offset))%2 as l1
+,       creation_time
+,       last_execution_time
+,       (total_worker_time+0.0)/1000 as total_worker_time
+,       (total_worker_time+0.0)/(execution_count*1000) as [AvgCPUTime]
+,       total_logical_reads as [LogicalReads]
+,       total_logical_writes as [logicalWrites]
+,       execution_count
+,       total_logical_reads+total_logical_writes as [AggIO]
+,       (total_logical_reads+total_logical_writes)/(execution_count + 0.0) as [AvgIO]
+,   case when sql_handle IS NULL
+                then '' 
+                else ( substring(st.text,(qs.statement_start_offset+2)/2,(case when qs.statement_end_offset = -1        then len(convert(nvarchar(MAX),st.text))*2      else qs.statement_end_offset    end - qs.statement_start_offset) /2  ) )
+        end as query_text 
+,       db_name(st.dbid) as database_name
+,       st.objectid as object_id
+from sys.dm_exec_query_stats  qs
+cross apply sys.dm_exec_sql_text(sql_handle) st
+where total_worker_time > 0 
+order by total_worker_time  desc
+========================================================================================
+--Table Scans in Query Plan Cache
+DECLARE @Table_Name sysname = 'my_table_name';
+;WITH XMLNAMESPACES(DEFAULT N'http://schemas.microsoft.com/sqlserver/2004/07/showplan')
+SELECT
+cp.plan_handle
+,operators.value('(TableScan/Object/@Schema)[1]','sysname') AS Schema_Name
+,operators.value('(TableScan/Object/@Table)[1]','sysname') AS Table_Name
+,operators.value('(TableScan/Object/@Index)[1]','sysname') AS Index_Name
+,operators.value('@PhysicalOp','nvarchar(50)') AS Physical_Operator
+,cp.usecounts
+,qp.query_plan
+FROM sys.dm_exec_cached_plans cp
+CROSS APPLY sys.dm_exec_query_plan(cp.plan_handle) qp
+CROSS APPLY query_plan.nodes('//RelOp') rel(operators)
+WHERE operators.value('@PhysicalOp','nvarchar(60)') IN ('Table Scan')
+AND operators.value('(TableScan/Object/@Table)[1]','sysname') = QUOTENAME(@Table_Name,'[');
+=================================================================================
