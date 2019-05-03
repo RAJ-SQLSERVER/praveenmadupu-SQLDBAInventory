@@ -1,0 +1,28 @@
+--Whats Currently running on the server
+SELECT 
+  der.session_id , --internal identifier for the running session
+  der.status , --determines if the query is active or waiting
+  der.start_time , --gives you an idea when the query started
+  der.command , --the type of command involved
+  der.database_id , --which database you're connected to
+  der.user_id , --which login is running the command
+  der.blocking_session_id , --session id of blocking session
+  der.wait_type , -- what is the waiting session it waiting on
+  der.wait_time , --how long has it been waiting
+  der.last_wait_type , --what caused it to last wait
+  der.cpu_time , --how much of the CPU has been used
+  der.total_elapsed_time , --how long has the command been running
+  der.reads , --has the command hit the disk for information
+  der.writes , --how much information was written to the disk
+  der.logical_reads --how many reads came out of memory
+FROM sys.dm_exec_requests AS der;
+====================================================================
+--Execution plan
+SELECT SUBSTRING(dest.text, ( der.statement_start_offset / 2 ) + 1,
+(der.statement_end_offset - der.statement_start_offset )
+/ 2 + 1)
+FROM sys.dm_exec_requests AS der
+CROSS APPLY sys.dm_exec_query_plan(der.plan_handle) AS deqp
+CROSS APPLY sys.dm_exec_sql_text(der.sql_handle) AS dest
+--WHERE der.session_id = 55;
+=========================================================================
