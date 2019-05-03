@@ -1,0 +1,331 @@
+--move of DB files from one location to another
+This Script generates the sql and powershell scripts necessary to move the Database Mdf and Ldf files from one Drive\Path to another
+Detach (Sql)
+Move (Powershell)
+Attach (Sql)
+It can script all database files for a server at once or with the addtion of some selection critera a subset of DBs
+Also includes reverse scripts if this a a temporary move.
+See Script for instructions
+=================================
+/****************************************************************
+This Script builds the SQL and powershell scripts necessary to move 
+one or all of the database files from one drive/ location to another
+
+Greg Ryan
+SQL 2008/2012
+3/19/2014
+****************************************************************/
+SET NOCOUNT ON
+DECLARE
+        @OrgDataDrv VarChar(100)
+,       @OrglogDrv VarChar(100)
+,       @TempDataDrv char(100)
+,       @TempLogDrv char(100)
+,       @BackupPath char(100)
+,       @GenerateScript int
+      
+/*Set drive / path to original DB Data file location*/
+SET @OrgDataDrv = '<orginal Data File Path Exp>>F:\MSSQL.1\MSSQL\Data\';
+/*Set drive / path to New DB Data file location*/
+SET @TempDataDrv = '<New Data File Path Exp>>S:\MSSQL.Data\';
+/*Set drive / path to original DB Log file location*/
+SET @OrgLogDrv = '<orginal Log File Path Exp>>L:\Tlogs\';
+/*Set drive / path to New DB Log file location*/
+SET @TempLogDrv = '<New Log File Path Exp>>S:\Tlogs\';
+/*Set path to where backups should be stored */
+SET @BackupPath = '<Backup Path Exp>>R:\'
+
+/***************Select which script to generate SET @GenerateScript = <value>  **********************
+1 - Backup Scripts
+2 - Lock and detach  (lock by setting into single user mode)
+3 - Copy MDF Powershell Script
+4 - Copy LDF Powershell Script
+5 - Attach and Unlock (unlock by setting into multi-user mode)
+--Used to generate reverse scripts when your move is temporary and you will move files back to orginal location later
+6 - Reverse Copy MDF Powershell Script
+7 - Reverse Copy LDF Powershell Script
+8 - Reverse Attach and Unlock (unlock by setting into multi-user mode)
+***************************************************************************/
+SET @GenerateScript = <value>  --<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+/*You can set selection critera further down in the script where noted*/
+
+
+/**************Do not modify below this line accept selection critera if needed, as noted******************/
+CREATE TABLE #DBDriveSpace
+       (
+        [Database] nvarchar(100)
+       ,Filenm varchar(100)
+       ,FileType varchar(25)
+       );
+
+DECLARE
+        @Database nvarchar(50)
+,       @Sql nvarchar(max);
+DECLARE cur_servers CURSOR
+FOR
+        ( SELECT
+                name
+            FROM
+                sys.databases);
+  
+                
+  
+OPEN cur_servers
+
+FETCH NEXT FROM cur_servers INTO @Database
+WHILE @@FETCH_STATUS = 0
+      BEGIN
+            SET @sql = 'Use ' + @Database
+                + ' Insert into #DBDriveSpace([Database], Filenm, FileType)
+            Select ''' + @Database + ''',physical_name, type
+            From sys.database_files '
+            BEGIN TRY
+--PRINT @SQL
+                  EXEC master.dbo.sp_executesql
+                    @Sql
+            END TRY
+            BEGIN CATCH
+                  PRINT ERROR_MESSAGE() + ' ' + @Database
+
+            END CATCH
+
+            FETCH NEXT FROM cur_servers INTO @Database
+      END;
+CLOSE cur_servers;
+DEALLOCATE cur_servers;
+
+
+/************************************************************************************/
+/***********Put Selection criteria here to script only a subset of the Dbs***********/
+/************************************************************************************/
+        
+--Example <DELETE FROM #DBDriveSpace
+--WHERE [Database] NOT IN (SELECT [Database] FROM #DBDriveSpace WHERE [Database] LIKE <Value> );>
+
+
+
+/****************************Do not modify below this line****************************/
+
+
+/*-----------------------------------*/ 
+IF @GenerateScript = 1
+/*Backup databases*/
+BEGIN
+WITH    cte ( [Database], Mdf, Ldf )
+          AS ( SELECT
+                    d1.[Database]
+                ,   d1.Filenm
+                ,   d2.Filenm
+                FROM
+                    #DBDriveSpace AS d1
+                INNER JOIN #DBDriveSpace AS d2
+                ON  d1.[Database] = d2.[Database]
+                WHERE
+                    d1.FileType = 0
+                    AND d2.FileType = 1
+             )
+     SELECT
+        'BACKUP DATABASE [' + [Database] + '] TO DISK = '''+ RTRIM(@BackupPath) + [Database] + '_Archive.bak'';'
+        FROM
+            cte
+        ORDER BY
+            [Database]
+ END
+ 
+/*-----------------------------------*/
+IF @GenerateScript = 2
+BEGIN
+/*Lock and detach*/
+WITH    cte ( [Database], Mdf, Ldf )
+          AS ( SELECT
+                    d1.[Database]
+                ,   d1.Filenm
+                ,   d2.Filenm
+                FROM
+                    #DBDriveSpace AS d1
+                INNER JOIN #DBDriveSpace AS d2
+                ON  d1.[Database] = d2.[Database]
+                WHERE
+                    d1.FileType = 0
+                    AND d2.FileType = 1
+             )
+     SELECT
+             'Alter database ' + [Database]
+            + ' set single_user with rollback IMMEDIATE;'
+        ,   'EXEC sp_detach_db ''' + [Database] + ''';'
+        FROM
+            cte
+        ORDER BY
+            [Database]
+ END            
+            
+  
+/*-----------------------------------*/
+IF @GenerateScript = 3
+BEGIN
+/*Powershell Copy MDF files*/
+WITH    cte ( [Database], Mdf, Ldf )
+          AS ( SELECT
+                    d1.[Database]
+                ,   d1.Filenm
+                ,   d2.Filenm
+                FROM
+                    #DBDriveSpace AS d1
+                INNER JOIN #DBDriveSpace AS d2
+                ON  d1.[Database] = d2.[Database]
+                WHERE
+                    d1.FileType = 0
+                    AND d2.FileType = 1
+             )
+     SELECT
+        
+            'Copy-Item ' + Mdf + ' -destination ' + REPLACE(mdf ,
+                                                              @OrgdataDrv ,
+                                                             RTRIM(@TempDataDrv))
+        FROM
+            cte
+        ORDER BY
+            [Database]
+ END            
+            
+ 
+/*-----------------------------------*/
+IF @GenerateScript = 4
+BEGIN
+/*Powershell Copy Ldf files*/
+WITH    cte ( [Database], Mdf, Ldf )
+          AS ( SELECT
+                    d1.[Database]
+                ,   d1.Filenm
+                ,   d2.Filenm
+                FROM
+                    #DBDriveSpace AS d1
+                INNER JOIN #DBDriveSpace AS d2
+                ON  d1.[Database] = d2.[Database]
+                WHERE
+                    d1.FileType = 0
+                    AND d2.FileType = 1
+             )
+     SELECT
+        'Copy-Item ' + Ldf + ' -destination ' + REPLACE(Ldf ,
+                                                              @OrgLogDrv ,
+                                                                RTRIM(@TempLogDrv))
+        
+        FROM
+            cte
+        ORDER BY
+            [Database]
+ END            
+  
+/*-----------------------------------*/
+IF @GenerateScript = 5
+BEGIN
+/*Attach and unlock*/
+WITH    cte ( [Database], Mdf, Ldf )
+          AS ( SELECT
+                    d1.[Database]
+                ,   d1.Filenm
+                ,   d2.Filenm
+                FROM
+                    #DBDriveSpace AS d1
+                INNER JOIN #DBDriveSpace AS d2
+                ON  d1.[Database] = d2.[Database]
+                WHERE
+                    d1.FileType = 0
+                    AND d2.FileType = 1
+             )
+     SELECT
+              'EXEC sp_attach_db @dbname = N''' + [Database] + ''', 
+			 @filename1 = N''' + REPLACE(mdf, @OrgdataDrv, RTRIM(@TempdataDrv)) + ''', 
+			 @filename2 = N''' + REPLACE(ldf, @OrglogDrv, RTRIM(@TemplogDrv)) + ''';'
+        ,   'Alter database ' + [Database]
+            + ' set multi_user with rollback IMMEDIATE;'
+        FROM
+            cte
+        ORDER BY
+            [Database]
+ END            
+            
+ 
+/*-----------------------------------*/
+IF @GenerateScript = 6
+BEGIN
+/*Reverse Powershell MDF Copy file Script*/
+WITH    cte ( [Database], Mdf, Ldf )
+          AS ( SELECT
+                    d1.[Database]
+                ,   d1.Filenm
+                ,   d2.Filenm
+                FROM
+                    #DBDriveSpace AS d1
+                INNER JOIN #DBDriveSpace AS d2
+                ON  d1.[Database] = d2.[Database]
+                WHERE
+                    d1.FileType = 0
+                    AND d2.FileType = 1
+             )
+     SELECT
+         'Move-item -path ' + REPLACE(mdf , @OrgdataDrv , RTRIM(@TempdataDrv)) + ' -destination ' + Mdf
+        FROM
+            cte
+        ORDER BY
+            [Database]
+ END            
+
+/*-----------------------------------*/
+IF @GenerateScript = 7
+BEGIN
+/*Reverse Powershell LDF Copy file Script*/
+WITH    cte ( [Database], Mdf, Ldf )
+          AS ( SELECT
+                    d1.[Database]
+                ,   d1.Filenm
+                ,   d2.Filenm
+                FROM
+                    #DBDriveSpace AS d1
+                INNER JOIN #DBDriveSpace AS d2
+                ON  d1.[Database] = d2.[Database]
+                WHERE
+                    d1.FileType = 0
+                    AND d2.FileType = 1
+             )
+     SELECT
+         'Move-item -path ' + REPLACE(ldf , @OrglogDrv , RTRIM(@TemplogDrv)) + ' -destination ' + ldf
+        FROM
+            cte
+        ORDER BY
+            [Database]
+ END            
+ 
+ /*-----------------------------------*/
+IF @GenerateScript = 8
+BEGIN
+/*Reverse Attach and unlock*/
+WITH    cte ( [Database], Mdf, Ldf )
+          AS ( SELECT
+                    d1.[Database]
+                ,   d1.Filenm
+                ,   d2.Filenm
+                FROM
+                    #DBDriveSpace AS d1
+                INNER JOIN #DBDriveSpace AS d2
+                ON  d1.[Database] = d2.[Database]
+                WHERE
+                    d1.FileType = 0
+                    AND d2.FileType = 1
+             )
+     SELECT
+          'EXEC sp_attach_db @dbname = N''' + [Database] + ''', 
+			 @filename1 = N''' + REPLACE(mdf, RTRIM(@TempdataDrv), @OrgdataDrv) + ''', 
+			 @filename2 = N''' + REPLACE(ldf, RTRIM(@TemplogDrv), @OrglogDrv) + ''';'
+        ,   'Alter database ' + [Database]
+            + ' set multi_user with rollback IMMEDIATE;'
+        FROM
+            cte
+        ORDER BY
+            [Database]
+ END            
+
+DROP TABLE #DBDriveSpace
+/*<End of Script>*/
