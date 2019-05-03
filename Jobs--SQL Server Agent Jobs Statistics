@@ -1,0 +1,57 @@
+--SQL Server Agent Jobs Statistics
+SELECT
+sJobHis.[server],
+sJobStep.database_name,
+SJob.name,
+SJob.enabled,
+CASE WHEN SJob.enabled = 0 THEN '0'
+WHEN sJobStep.subsystem = 'TSQL' AND sJobStep.command LIKE '%--%' 
+AND AVG(CAST(SUBSTRING(STUFF(
+            STUFF(RIGHT('000000' + CAST([sJobHis].[run_duration] AS VARCHAR(6)),  6)
+                , 3, 0, ':')
+            , 6, 0, ':') ,7,2) AS INT)) < 1 THEN '0'
+WHEN sJobStep.subsystem = 'TSQL' AND sJobStep.command LIKE '%*/%'
+AND AVG(CAST(SUBSTRING(STUFF(
+            STUFF(RIGHT('000000' + CAST([sJobHis].[run_duration] AS VARCHAR(6)),  6)
+                , 3, 0, ':')
+            , 6, 0, ':') ,7,2) AS INT)) < 1
+ THEN '0'
+ELSE '1' END AS  [ActiveStep],
+sLogin.name [JobOwner],
+sJobHis.step_id,
+sJobHis.step_name,
+sJobStep.subsystem AS [CommandType],
+sJobStep.command AS [Command],
+sJobHis.run_date,
+[sJobSch].next_run_time AS [Scheduled_Time],
+--sJobHis.run_time,
+--sJobHis.run_duration,
+AVG( CAST( SUBSTRING(STUFF(
+            STUFF(RIGHT('000000' + CAST([sJobHis].[run_duration] AS VARCHAR(6)),  6)
+                , 3, 0, ':')
+            , 6, 0, ':') ,4,2)AS INT))
+       AS [AvgRunDuration_In_Min], 
+AVG(CAST(SUBSTRING(STUFF(
+            STUFF(RIGHT('000000' + CAST([sJobHis].[run_duration] AS VARCHAR(6)),  6)
+                , 3, 0, ':')
+            , 6, 0, ':') ,7,2) AS INT))
+       AS [AvgRunDuration_In_Sec],
+COUNT(*) AS [PerDay]
+FROM sysjobs AS [SJob] 
+LEFT JOIN sysjobhistory AS [sJobHis] ON SJob.job_id = sJobHis.job_id
+LEFT JOIN sysjobsteps AS [sJobStep] ON sJobHis.job_id = sJobStep.job_id AND sJobHis.step_id = sJobStep.step_id
+INNER JOIN master.dbo.syslogins [sLogin] ON SJob.owner_sid = sLogin.sid
+INNER JOIN dbo.sysjobschedules [sJobSch] ON SJob.job_id = [sJobSch].job_id
+WHERE  SJob.[enabled]=0 OR ( sJobHis.step_id > 0  AND (sJobHis.run_date > 20131002 AND sJobHis.run_date < 20131005)) 
+GROUP BY sJobHis.[server],
+sJobStep.database_name,
+SJob.name,
+SJob.enabled,
+sLogin.name ,
+sJobHis.step_id,
+sJobHis.step_name,
+sJobStep.subsystem ,
+sJobStep.command ,
+sJobHis.run_date,
+[sJobSch].next_run_time
+ORDER BY SJob.enabled DESC, SJob.name, sJobHis.run_date DESC
