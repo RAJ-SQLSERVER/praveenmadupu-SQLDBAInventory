@@ -1,0 +1,174 @@
+--Email SP Results
+--https://www.sqlservercentral.com/scripts/email-sp-results
+USE [tempdb]
+GO
+CREATE PROC [dbo].[dba_EmailProcResults]  --'dba_CheckLogbackups','DBAdmin', 'nicholaswilliams@', @vcDynamicSubject = 'Log Backup Check'
+	 @vcProcName			VARCHAR(1000)
+	,@vcDatabaseName		VARCHAR(100)
+	,@vcRecipients			VARCHAR(1000)	
+	,@vcSchemaName			VARCHAR(100)	= NULL
+	,@bAttachQueryAsFile	BIT				= 0
+	,@vcDynamicSubject		VARCHAR(100)	= 'Query results'
+
+AS
+/*
+sp_configure 'Show Advanced Options', 1
+GO
+RECONFIGURE
+GO
+sp_configure 'Ad Hoc Distributed Queries', 1
+GO
+RECONFIGURE
+GO
+*/
+/*
+Author:	Nicholas Williams
+Date:	20140519
+Desc:	Uses a proc as in input and email's the results.
+
+Note:	still plenty to update...
+		Procs cant reference non existant objects, even if logic would prevent them from being used ie. conditional if clause refering to non-existent table, as the remote call seems to force a parse on the query.
+		yet to make the table columns "smart" in terms of data lengths.
+		Requires Distributed Queries :/
+		add in a '?' reference help parameter
+		Cannot handle '' or blank string columns aliased as an actual column... need to fix.
+
+@attach_query_result_as_file = 1,
+    @query_attachment_filename='filename.csv',		
+*/
+SET NOCOUNT ON
+DECLARE
+	 @vcServerName		VARCHAR(100)
+	,@vcString			VARCHAR(325)
+	,@vcColumnName		VARCHAR(200)
+	,@nvcTable1			NVARCHAR(MAX)
+	,@nvcQuery			NVARCHAR(MAX)
+	,@nvcBody			NVARCHAR(MAX)
+	,@vcHeader			VARCHAR(1000)
+	,@vcTrailer			VARCHAR(1000)
+
+DECLARE	@MyTable TABLE
+	(
+	 string NVARCHAR(MAX)
+	)
+
+IF (@vcSchemaName) IS NULL
+BEGIN
+	SET	 @vcSchemaName		= 'dbo'
+	PRINT 'Warning: Schema name was null, setting it to dbo as a default.'
+END
+
+SET		@vcServerName		= 'Server='+(SELECT @@SERVERNAME)+';Trusted_Connection=yes;'
+SELECT	@vcString			= 'EXEC ['+@vcDatabaseName+'].['+@vcSchemaName+'].'+(REPLACE(@vcProcName, '''',''''''))+''
+
+EXEC	('
+		SELECT * INTO ##MyTempTable 
+		FROM OPENROWSET(''SQLNCLI'', '''+@vcServerName+''','''+@vcString+''')
+		')
+IF (SELECT COUNT(1) FROM ##MyTempTable) >=1
+BEGIN
+
+IF @bAttachQueryAsFile <> 1
+BEGIN
+	SET @vcHeader = '
+	<html><style>table{font-family:Arial;font-size:10;background=black;
+	color:Black;}html, body, title, 
+	head{font-family:Arial;font-size:10;background:white;color:Black;}th{font-family:Arial;font-size:15;background=orange;color:Black;}
+	{font-family:Arial;font-size:10;color:Black;background:White;align:left;valign:top;}</style><body><p><font face="Arial" size="2">Greetings,<br><br>Please see below.<br></font></p>'
+	SET @vcTrailer = '</body></html>'
+	--SELECT * FROM ##MyTempTable
+	SET @nvcTable1 = 
+		'<br>'+
+		'<table width=600 border=1 cellspacing=0 cellpadding=5>'+
+		'<tr style="background-color: White;">'
+	SET @nvcQuery = '
+	SELECT CAST((SELECT '
+	DECLARE column_cursor SCROLL CURSOR FOR
+	SELECT name FROM tempdb.sys.columns
+	WHERE object_id = 
+				(
+				SELECT id FROM tempdb.dbo.sysobjects
+				WHERE id = OBJECT_ID('tempdb..##MyTempTable')
+				)
+	/*
+	Need to put in a check to ensure that the result set is less than 4MB, so that it can be emailed.
+	*/
+	OPEN column_cursor
+	/*
+	Note: The odd use of the double fetch statement here is to force the force record of the fetch to be formatted differently, ie. no "," for the first record of the select.
+	hmm... now that I have changed how the select statement is used, i dont think i need it in the cursor anymore... change later.
+	*/
+	   FETCH FIRST FROM column_cursor
+	   INTO @vcColumnName
+
+   		SET @nvcQuery = ISNULL(@nvcQuery,'')+
+			'
+			 ['+@vcColumnName+']	AS ''td'','''''
+	
+		SET @nvcTable1 = @nvcTable1 +
+				'<th width=100>'+@vcColumnName+'</th>'
+	   FETCH NEXT FROM column_cursor
+	   INTO @vcColumnName
+
+	WHILE @@FETCH_STATUS = 0
+	BEGIN 
+		SET @nvcTable1 = @nvcTable1 +
+				'<th width=100>'+@vcColumnName+'</th>'
+
+		SET @nvcQuery = ISNULL(@nvcQuery,'')+
+			'
+			,['+@vcColumnName+']	AS ''td'','''''
+
+	   FETCH NEXT FROM column_cursor
+	   INTO @vcColumnName
+
+	END
+	SET @nvcTable1 = @nvcTable1 +		
+	'</tr>'
+	SET @nvcQuery = @nvcQuery+ 
+			'
+			FROM ##MyTempTable
+			FOR XML PATH(''tr''), TYPE) AS NVARCHAR(MAX))'
+	SET @vcTrailer=		'</table><br><br><font face="Arial" size="2"><p>Regards</p><font face="Arial" size="2"><p>UrCompanyName<br></font><font size="1">Microsoft SQL Sever<br><br>Sender info:<br>'+'User - '+SYSTEM_USER+'<br>'+'Procedure - '+@vcProcName+'<br>'+'Database - '+@vcDatabaseName+'<br>'+'Server - '+isnull(@@SERVERNAME,'')+'<br></font></p>'
+	CLOSE column_cursor
+	DEALLOCATE column_cursor
+
+	INSERT INTO @MyTable
+	EXEC (@nvcQuery)
+
+	SELECT @nvcQuery = String FROM @MyTable
+	SELECT @nvcBody = @vcHeader+@nvcTable1+@nvcQuery+@vcTrailer
+	--SELECT @nvcBody
+
+	EXEC msdb.dbo.sp_send_dbmail   
+		 @recipients	= @vcRecipients
+		,@subject		= @vcDynamicSubject
+		,@body			= @nvcBody
+		,@body_format	= 'HTML'  
+
+END
+ELSE
+BEGIN
+	EXEC msdb.dbo.sp_send_dbmail   
+		 @recipients					= @vcRecipients
+		,@subject						= @vcDynamicSubject
+		,@body							= 'Please View attached file for query results.'
+		,@body_format					= 'Text'  	
+		,@attach_query_result_as_file	= 1
+		,@query_attachment_filename		= 'QueryResults.xls'
+		,@query_result_separator		= '	'
+		,@query_result_no_padding		= 0
+		,@query							= 'SET NOCOUNT ON SELECT * FROM ##MyTempTable SET NOCOUNT OFF'
+END
+
+END
+DROP TABLE ##MyTempTable
+SET NOCOUNT OFF
+
+/*
+set a variable for the table width and the column widths.
+add to each length for table for each iteration of the cursor.
+look at sys.columns table for data type of the columns to manage table size effectively.
+--		td = tranDate,''''
+*/
+SET NOCOUNT OFF
