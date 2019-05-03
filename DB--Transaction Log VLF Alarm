@@ -1,0 +1,142 @@
+--Transaction Log VLF Alarm Notification mail alert
+This will send a alert email using native DB Mail when the VLF counts from any auto growth on transaction logs take place too much. 
+Best practice is to have a auto growth set to a reasonable size growth like from 256-512mb a growth. 
+We had to put his in place as a counter measue from an outage caused by too many VLF's and 
+ther log reader agent had issues reading the transaction logs. One thing you need to do is create the table in a database 
+that matches the references in the code for the insert and selects performed. 
+This worked great and alerted until we foun the nice very large size this tran log needed to be for the maint taking place 
+Sunday AM once fully completed. Create table code supplied at the bottom od the code. Hope you find this useful.
+
+--Run in a SQL Agent Job step and schedule
+Set nocount on
+Declare @datestamp datetime,@ServerName varchar(55)
+Select @datestamp = (Left(CONVERT(varchar, CURRENT_TIMESTAMP, 0), 19))
+Print @datestamp
+--500 alarm
+--1000 Sev1 alarm
+--variables to hold each 'iteration'  
+declare @query varchar(100)  
+declare @dbname sysname  
+declare @vlfs int  
+  
+--table variable used to 'loop' over databases  
+declare @databases table (dbname sysname)  
+insert into @databases  
+--only choose online databases  
+select name from sys.databases where state = 0  
+  
+--table variable to hold results  
+declare @vlfcounts table  
+    (dbname sysname,  
+    vlfcount int)  
+  
+ --table variable to capture DBCC loginfo output  
+--changes in the output of DBCC loginfo from SQL2012 mean we determine the version 
+ 
+declare @MajorVersion tinyint  
+set @MajorVersion = LEFT(CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max)),CHARINDEX('.',CAST(SERVERPROPERTY('ProductVersion') AS nvarchar(max)))-1) 
+ 
+if @MajorVersion < 11 -- pre-SQL2012 
+begin 
+    declare @dbccloginfo table  
+    (  
+        fileid tinyint,  
+        file_size bigint,  
+        start_offset bigint,  
+        fseqno int,  
+        [status] tinyint,  
+        parity tinyint,  
+        create_lsn numeric(25,0)  
+    )  
+  
+    while exists(select top 1 dbname from @databases)  
+    begin  
+  
+        set @dbname = (select top 1 dbname from @databases)  
+        set @query = 'dbcc loginfo (' + '''' + @dbname + ''') '  
+  
+        insert into @dbccloginfo
+		--dmg_utility..vlf_counts  
+        exec (@query)  
+  
+        set @vlfs = @@rowcount  
+  
+        insert dmg_stat..vlf_counts  
+        values(@dbname, @vlfs,@datestamp)  
+  
+        delete from @databases where dbname = @dbname  
+  
+    end --while 
+end 
+else 
+begin 
+    declare @dbccloginfo2012 table  
+    (  
+        RecoveryUnitId int, 
+        fileid tinyint,  
+        file_size bigint,  
+        start_offset bigint,  
+        fseqno int,  
+        [status] tinyint,  
+        parity tinyint,  
+        create_lsn numeric(25,0)  
+    )  
+  
+    while exists(select top 1 dbname from @databases)  
+    begin  
+  
+        set @dbname = (select top 1 dbname from @databases)  
+        set @query = 'dbcc loginfo (' + '''' + @dbname + ''') '  
+  
+        insert into @dbccloginfo2012  
+        exec (@query)  
+  
+        set @vlfs = @@rowcount  
+  
+        insert VLFtable_stat..vlf_counts  
+        values(@dbname, @vlfs,@datestamp)  
+  
+        delete from @databases where dbname = @dbname  
+  
+    end --while 
+end 
+  
+--output the full list  
+select dbname, vlfcount  
+from VLFtable_stat..vlf_counts where vlfcount > 550
+and @datestamp = Time_stamp
+order by dbname
+If @@rowcount <> 0
+
+Begin
+
+set nocount on
+Declare @srvname varchar(55),@subject1 varchar(255)
+Select @srvname = @@servername
+DECLARE @xml NVARCHAR(MAX)
+DECLARE @body NVARCHAR(MAX)
+SET @xml =CAST(( select dbname AS 'td','',vlfcount AS 'td','',Convert(varchar,Time_stamp,100) as 'td' 
+from VLFtable_stat..vlf_counts where vlfcount > 550
+and @datestamp = Time_stamp
+order by dbname
+FOR XML PATH('tr'), ELEMENTS ) AS NVARCHAR(MAX))
+SET @body ='<html><H1>The VLF Count is too high on '+ @srvname +'</H1><body bgcolor=white>
+<table border="1" style="font-family:Georgia, Garamond, Serif;color:blue;font-style:italic;">
+<tr><th>DBName</th><th>VLF_Counts</th><th>Time_Stamp</th>
+</tr>' SET @body = @body + @xml +'</table></body></html>'
+Set @subject1 = 'VLF Count Alarm on ' + @srvname
+EXEC msdb.dbo.sp_send_dbmail
+@recipients =N'someone@somewhere.com;someone@somewhere.com',
+@body = @body,@body_format ='HTML',
+@subject = @subject1 ,
+@profile_name ='Replication'
+
+End
+/*
+--Table code
+CREATE TABLE [dbo].[VLF_Counts](
+	[DBNAME] [varchar](250) NULL,
+	[vlfcount] [int] NULL,
+	[Time_Stamp] [datetime] NULL
+) ON [PRIMARY]
+*/
