@@ -1,0 +1,89 @@
+--Complete Details About Backups Taken a Day Ago
+SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+SET NOCOUNT ON;
+Declare @FromDate as datetime;
+
+-- Specify the from date value
+SET @FromDate = GETDATE() -1;
+
+SELECT 
+   RTRIM(ltrim(CONVERT(CHAR(100), SERVERPROPERTY('Servername')))) AS SQLServerName, 
+   msdb.dbo.backupset.database_name,
+   msdb.dbo.backupfile.page_size, -- Size of the page, in bytes.
+   msdb.dbo.backupfile.physical_name,
+   msdb.dbo.backupfile.is_present, -- 1 = File is contained in the backup set.
+   --msdb.dbo.backupfile.file_type,
+      CASE msdb.dbo.backupfile.file_type 
+       WHEN 'D' THEN 'Data File' 
+       WHEN 'L' THEN 'Log File' 
+       WHEN 'F' THEN 'Full text catalog'
+	  ELSE msdb.dbo.backupfile.file_type
+	 END AS file_type,
+   Convert(numeric(10,2),msdb.dbo.backupfile.file_size/1024/1024) 'File_Size_MB', -- Length of the file that is backed up, in bytes. Can be NULL.
+   msdb.dbo.backupfile.backed_up_page_count,
+   msdb.dbo.backupfile.source_file_block_size, -- Device that the original data or log file resided on when it was backed up. Can be NULL.
+   msdb.dbo.backupfile.logical_name,
+   msdb.dbo.backupfile.physical_name,
+   CASE msdb.dbo.backupset.compatibility_level
+         WHEN 80 THEN 'SQL Server 2000' 
+         WHEN 90 THEN 'SQL Server 2005 ' 
+         WHEN 100 THEN 'SQL Server 2008' 
+         WHEN 110 THEN 'SQL Server 2011' 
+       END                      AS CompatibilityLevel, 
+   CASE msdb..backupset.type  
+       WHEN 'D' THEN 'Database' 
+       WHEN 'L' THEN 'Log' 
+       WHEN 'I' THEN 'Differential' 
+   END AS backup_type,
+   msdb.dbo.backupset.backup_start_date,
+   msdb.dbo.backupset.backup_finish_date,
+   msdb.dbo.backupset.expiration_date,
+   DATEDIFF (SECOND, msdb.dbo.backupset.backup_start_date, msdb.dbo.backupset.backup_finish_date) 'Backup Elapsed Time (sec)',
+   --msdb.dbo.backupset.compressed_backup_size AS 'Compressed Backup Size in KB',
+  (msdb.dbo.backupset.compressed_backup_size/1024/1024) AS 'Compress Backup Size in MB',
+   --msdb.dbo.backupset.backup_size/1024 'Actual backup_size_KB',
+   msdb.dbo.backupset.backup_size/1024/1024 'Actual backup_size_MB',
+   msdb.dbo.backupset.is_password_protected 'Is_Backup_Password_Protected',  
+   msdb.dbo.backupset.is_damaged 'Is_Backup_Damaged', -- 1 = Damage to the database was detected when this backup was created. The backup operation was requested to continue despite errors.
+   CONVERT (NUMERIC (20,3), (CONVERT (FLOAT, msdb.dbo.backupset.backup_size) /CONVERT (FLOAT, msdb.dbo.backupset.compressed_backup_size))) 'Compression Ratio',
+   --CASE WHEN ISNULL([compressed_backup_size], 0) > 0 THEN [compressed_backup_size] / [backup_size] END '[Compression Ratio]',
+  Convert(INT,COALESCE([compressed_backup_size]/1024, msdb.dbo.backupset.backup_size/1024) / NULLIF(DATEDIFF(second, [backup_start_date], [backup_finish_date]),0)) '[Thruput ( kilo-bytes per second )]' ,
+  --CAST(msdb.dbo.backupset.backup_size / (DATEDIFF(minute,msdb.dbo.backupset.backup_start_date,msdb.dbo.backupset.backup_finish_date) + 0.0000001)/1024.0/1024.0 AS DECIMAL(16,2)) AS mb_per_minute,
+   CASE msdb..backupset.type  
+       WHEN 'D' THEN 'Database - full' 
+       WHEN 'L' THEN 'Database - Log'
+	   WHEN 'I' THEN 'Differential'
+       WHEN 'F' THEN 'File or filegroup' 
+       WHEN 'G' THEN 'Differential file' 
+       WHEN 'P' THEN 'Partial' 
+       WHEN 'Q' THEN 'Differential partial'
+   ELSE msdb..backupset.type 
+   END AS backup_type,
+   msdb.dbo.backupmediafamily.logical_device_name,  
+   --msdb.dbo.backupmediafamily.physical_device_name,   
+   msdb.dbo.backupset.name AS backupset_name,
+  msdb.dbo.backupmediafamily.physical_device_name AS PhysicalDevice,-- backup Physical location 
+       CASE device_type 
+         WHEN 2 THEN 'Disk - Temporary' 
+         WHEN 102 THEN 'Disk - Permanent' 
+         WHEN 5 THEN 'Tape - Temporary' 
+		 WHEN 7 THEN 'Virtual device'
+         WHEN 105 THEN 'Tape - Permanent backup device' 
+       --ELSE 'Other Device'
+	   ELSE CAST('Unknown: ' + device_type AS NVARCHAR(15))
+       END                      AS DeviceType,-- Device type 
+   msdb.dbo.backupset.description,
+   msdb.dbo.backupmediaset.is_compressed
+FROM   msdb.dbo.backupmediafamily  
+   INNER JOIN msdb.dbo.backupset ON msdb.dbo.backupmediafamily.media_set_id = msdb.dbo.backupset.media_set_id 
+   INNER JOIN msdb.dbo.backupmediaset ON msdb.dbo.backupmediaset.media_set_id = msdb.dbo.backupmediafamily.media_set_id
+   INNER JOIN msdb.dbo.backupfile ON msdb.dbo.backupfile.backup_set_id = msdb.dbo.backupset.backup_set_id
+WHERE
+CONVERT(datetime, msdb.dbo.backupset.backup_start_date, 102) >= @FromDate
+AND msdb.dbo.backupset.backup_size > 0 
+ORDER BY 
+   msdb.dbo.backupset.database_name, 
+   msdb.dbo.backupset.backup_finish_date;
+SET NOCOUNT OFF;
+GO
+SET TRANSACTION ISOLATION LEVEL READ COMMITTED;
