@@ -1,0 +1,33 @@
+--SQL Files with larger disk consumption
+======================================================
+The values presented for this column should be identified according to the table below:
+< 1ms: unbelievable;
+< 3ms: excellent;
+< 5ms: very good;
+< 10ms: within the expected;
+< 20ms: reasonable;
+< 50ms: limit;
+> 100ms: bad;
+> 1 sec: severe disk contention; and
+> 15 sec: serious problems with the storage or disk.
+========================================================
+Use Master
+Go
+;With Top10FilesWithLargerDiskConsumption
+As
+(
+Select DB_NAME(database_id) AS 'Database Name',
+             file_id As 'File Id',
+			 io_stall_read_ms As 'IO Stall Read in Ms', 
+			 num_of_reads As 'Numbers of Reads',
+			 CAST(io_stall_read_ms/(1.0 + num_of_reads) AS NUMERIC(10,1)) AS 'AVG Read Stall in MS', 
+			 io_stall_read_ms + io_stall_write_ms AS 'IO Stalls',
+			 num_of_reads + num_of_writes AS 'Totals IO',
+			 CAST((io_stall_read_ms + io_stall_write_ms)/(1.0 + num_of_reads + num_of_writes) AS NUMERIC(10,1)) AS 'AVG IO Stall in MS',
+			 Convert(Date,GETDATE(),103) as Date
+FROM sys.dm_io_virtual_file_stats(null,null)
+Where file_id <> 2
+)
+Select Top 10 * from Top10FilesWithLargerDiskConsumption
+Order By [AVG Read Stall in MS] Desc
+Go
