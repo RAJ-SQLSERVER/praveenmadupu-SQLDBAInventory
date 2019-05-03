@@ -1,0 +1,56 @@
+--DB--configure Log File Size for Large DBs
+The dynamic code can be used to generate ALTER DATABASE script for configuring optimum size for Log file of any large database.
+
+User has to provide database name and its log file size in order to configure the log file. Below are the lines to where these changes are required:-
+
+-- Provide DB Name & Max Log file size
+SET @_Database_Name = 'Test'
+SET @_Max_Log_Size_GB = 230
+The log file size should be in GBs.
+==============================================================================
+SET NOCOUNT ON;
+DECLARE @_Database_Name SYSNAME = NULL
+		,@_Max_Log_Size_GB INT = NULL
+		,@_Execution_Query NVARCHAR(2000) = ''
+		,@_Logical_File_Name SYSNAME
+		,@_Size_Counter_GB INT = 8
+		,@_File_Size INT
+
+--	Provide DB Name & Max Log file size
+SET	@_Database_Name = 'Test'
+SET     @_Max_Log_Size_GB = 230
+
+IF (SELECT COUNT(1) FROM SYS.sysdatabases WHERE name = @_Database_Name) = 1
+BEGIN
+
+	SELECT	@_Logical_File_Name = name
+	FROM	sys.master_files 
+	WHERE	DB_NAME(database_id) = @_Database_Name
+	AND		type_desc = 'LOG'
+
+	WHILE (@_Size_Counter_GB <= @_Max_Log_Size_GB)OR((@_Size_Counter_GB-@_Max_Log_Size_GB)<8)
+	BEGIN
+		IF (@_Size_Counter_GB <= @_Max_Log_Size_GB)
+			SET	@_File_Size = @_Size_Counter_GB*1000
+		ELSE
+			SET	@_File_Size = (@_Max_Log_Size_GB - (@_Size_Counter_GB-8))*1000
+
+		SET	@_Execution_Query = '
+		USE master;
+		GO
+		ALTER DATABASE ['+@_Database_Name+'] 
+		MODIFY FILE
+		(	NAME = ['+@_Logical_File_Name+'],
+			SIZE = '+CAST(@_File_Size AS VARCHAR(10))+'MB,
+			FILEGROWTH = 8000MB
+		);
+		GO
+		';
+		
+		PRINT @_Execution_Query
+			SET @_Size_Counter_GB += 8
+	END
+	
+END
+ELSE
+	THROW 50000,'Provided Database does not exists',1
