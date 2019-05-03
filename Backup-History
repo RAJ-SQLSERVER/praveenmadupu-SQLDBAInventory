@@ -40,3 +40,20 @@ JOIN ( SELECT a.database_name, max(a.backup_finish_date) backup_finish_date
 	JOIN msdb.dbo.backupmediafamily z ON x.media_set_id = z.media_set_id 
 --	where x.database_name = 'xyz'
 Order by y.backup_finish_date desc
+
+============================================================================
+--Check Databases That Have Not Had a Full Backup in x Days
+
+DECLARE @num_of_days INT
+SET @num_of_days = 1 
+
+SELECT
+	A.name
+	, MAX(B.backup_finish_date) AS 'LastBackupDateTime'
+FROM
+	master.dbo.sysdatabases A WITH(NOLOCK) LEFT OUTER JOIN
+	msdb.dbo.backupset B WITH(NOLOCK) ON A.name = B.database_name
+WHERE (B.TYPE = 'D' OR B.TYPE IS NULL)
+GROUP BY A.name
+HAVING (MAX(B.backup_finish_date) < GETDATE() - @num_of_days OR MAX(B.backup_finish_date) IS NULL) 
+ORDER BY A.name
