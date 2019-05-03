@@ -1,0 +1,75 @@
+--Shrink Tlog Files
+- create a temporary table to insert the above mentioned output against each databases.
+
+-- Check the Tlog files to shrink
+SET NOCOUNT on
+create table #db_files(
+--Id INT IDENTITY(1,1),//use row_number() function.
+DB_name VARCHAR(MAX),
+Recovery_model VARCHAR(200),
+db_files varchar(4000),
+file_loc varchar(4000),
+filesizeMB decimal(9,2),
+spaceUsedMB decimal(9,2),
+FreespaceMB decimal(9,2)
+--,cmd varchar(4000)
+)
+
+declare @strSQL nvarchar(2000)
+DECLARE @dbName varchar(MAX)
+DECLARE @getDBname CURSOR
+
+SET @getDBname = CURSOR FOR
+select name FROM sys.databases
+WHERE  state_desc = 'ONLINE'
+
+OPEN @getDBname
+FETCH NEXT
+FROM @getDBname INTO @dbName
+WHILE @@FETCH_STATUS = 0
+BEGIN
+--PRINT @dbName
+
+select @strSQL = 
+    '
+        use ' + quotename(@dbname) + '
+        INSERT INTO #db_files
+        select '''+ @dbname+'''
+	,Convert(varchar(100), DATABASEPROPERTYEX(''' + @dbname + ''',''recovery''))
+     , name
+    , physical_name
+    , convert(decimal(12,2),round(a.size/128.000,2)) as FileSizeMB
+    , convert(decimal(12,2),round(fileproperty(a.name,''SpaceUsed'')/128.000,2)) as SpaceUsedMB
+    , convert(decimal(12,2),round((a.size-fileproperty(a.name,''SpaceUsed''))/128.000,2)) as FreeSpaceMB
+	--, ''use '' + QUOTENAME(db_name) + '';''+ CHAR(13) + ''DBCC ShrinkFile('' + db_files +'',TRUNCATEONLY);'' + CHAR(13)''''
+	 from sys.database_files a
+	WHERE type_desc = ''LOG'' -- signifies log file
+    '
+
+
+   --select @strSQL
+   exec sp_executesql @strSQL
+
+FETCH NEXT
+FROM @getDBname INTO @dbName
+
+END
+CLOSE @getDBname
+DEALLOCATE @getDBname
+
+
+ALTER TABLE #db_files ADD cmd VARCHAR(2000) NULL;
+
+
+UPDATE #db_files
+SET cmd = 'USe ' + QUOTENAME(db_name) + ';'+ CHAR(13) + 'DBCC ShrinkFile(''' + db_files +''',TRUNCATEONLY);' + CHAR(13)
+FROM #db_files
+
+SELECT  * FROM #db_files
+ORDER BY FreespaceMB desc
+
+
+GO
+DROP TABLE #db_files
+
+GO
