@@ -1,0 +1,132 @@
+--SP Send Query Result as HTML table using DBMail
+--https://www.sqlservercentral.com/scripts/sp-send-query-result-as-html-table-using-dbmail
+This script will create a stored procedure that can be used to send dbMail with query results in an html table.  For ease of use I've broken the query parts out into separate parameters.  The list of fields being returned should be delimited using the pipe character |.  
+
+There are other sources that explain how to include query results as an html table.  The focus of this script is to create a stored procedure that is easy to use.  The stored procedure is also set up to not send emails if no results are returned from the query.  Note that all objects must be fully qualified (database.schema.object) and parts of the query that are not needed are optional.
+
+A sample call would be:
+
+EXEC DBADatabase.dbo.SendDBEmailwithTabularQuery 
+@qSELECT = N'SELECT TOP 100',
+    @fieldlist = N' COUNT(tC.Client_ID) AS ClientCount|LEFT(tC.Client_FullName,2) AS ShortClientName|tB.AssociatesId',
+    @qFROM = N'FROM database.dbo.Clients tC
+INNER JOIN database.dbo.Associates tB ON tB.AssociatesId = tC.AssociatesId', 
+    @qWHERE = N'WHERE tC.Deleted =0', 
+@qGroupBy = N'GROUP BY LEFT(tC.Client_FullName,2), tB.AssociatesId',
+--@qHaving = N'HAVING COUNT(tC.Client_ID)>2',
+    @qOrderBy = N'ORDER BY tB.AssociatesId', 
+    @recipients = N'david.gugg@SQLServerCentral.com',
+    @subject = N'email test',
+    @Title = N'Query Results' 
+    =================================================================================
+    USE [DBADatabase]
+GO
+/****** Object:  StoredProcedure [dbo].[SendDBEmailwithTabularQuery]    Script Date: 2/14/2014 3:49:42 PM ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- =============================================
+-- Author:	david.gugg for SQL Server Central
+-- Create date: 02/14/2014
+-- Description:	This stored procedure will send an email from the database with the query results as an html table in the email.
+-- =============================================
+CREATE PROCEDURE [dbo].[SendDBEmailwithTabularQuery]
+(
+	@qSELECT NVARCHAR(100), --The select part of the sql statement, which can include top X
+	@fieldlist NVARCHAR(MAX), --Pipe delimited list of fields, which can include aliases
+	@qFROM NVARCHAR(MAX), --The from part of the sql statment, which can include joins
+	@qWHERE NVARCHAR(MAX) = '', --The where part of the sql statement
+	@qGroupBy NVARCHAR(MAX) = '',--The group by clause
+	@qHaving NVARCHAR(MAX) = '',--The having clause
+	@qOrderBy NVARCHAR(MAX) = '', --The order by part of the sql statement
+	@recipients NVARCHAR(4000), --The recipients of the email
+	@subject NVARCHAR(400), --The subject of the email
+	@Title NVARCHAR(4000) = '' --The title of the html table that holds the query results
+)
+
+AS
+BEGIN
+
+	--Declare initial variable.
+	DECLARE @xml NVARCHAR(MAX)
+	DECLARE @body NVARCHAR(MAX)
+	DECLARE @sql NVARCHAR(MAX)
+	DECLARE @resultexist NVARCHAR(MAX)
+	DECLARE @tblfieldheader NVARCHAR(MAX) = ''
+	DECLARE @tempfield NVARCHAR(MAX) = ''
+	CREATE TABLE #Fields (ID INT IDENTITY(1,1),field NVARCHAR(MAX))
+	DECLARE @i INT = 1, @j INT = 0, @SendEmail INT
+	DECLARE @splitcnt INT
+	DECLARE @fieldcount INT  
+  
+	--Find the number of fields in the query  
+	SELECT @splitcnt = LEN(@fieldlist)-LEN(REPLACE(@fieldlist,'|',''))
+	--Loop through the fields and put each on into the #Fields temp table as a new record
+	WHILE @j <= @splitcnt
+		BEGIN
+			INSERT INTO #Fields ( field ) SELECT s FROM DBAAdmin.dbo.SplitString(@fieldlist,'|') WHERE zeroBasedOccurance = @j
+			SET @j += 1
+		END
+	
+	SELECT @fieldcount = @splitcnt + 1 --Will be the splitcnt + 1, otherwise MAX(ID) FROM #Fields  
+
+	--Start setting up the sql statement for the query.
+	SET @sql = @qSELECT
+	--Loop through the #Fields table to get the field list
+	WHILE @i <= @fieldcount
+		BEGIN
+			SELECT @tempfield = field FROM #Fields WHERE ID = @i
+			--------------------------------------------------------------------------------------------------------------------------------------------------------------
+			--This next section is required in case a field is aliased.  For the xml, we need to get rid of the aliases, the table header will only require the aliases.
+			--NULL values need to be shown as a string = 'NULL' or the html table will just skip the cell and all values after that in the row will be shifted left.
+			---------------------------------------------------------------------------------------------------------------------------------------------------------------
+			IF RIGHT(@tempfield,1) = ']' OR CHARINDEX(' as ',@tempfield) = 0
+				BEGIN
+					--Set the xml field to be the entire field name
+					SET @sql = @sql + ' ISNULL(CAST(' + @tempfield + ' AS NVARCHAR(4000)),''NULL'') AS ''td'','''','
+					--Set the table header field to be the entire field name
+					SET @tblfieldheader = @tblfieldheader + '<th>' + @tempfield + '</th>'
+				END          
+			ELSE 
+				BEGIN
+					--Set the xml field to be the field name minus the alias
+					SET @sql = @sql + ' ISNULL(CAST(' + LEFT(@tempfield,LEN(@tempfield) - (CHARINDEX(' sa ',REVERSE(@tempfield))+3)) + ' AS NVARCHAR(4000)),''NULL'') AS ''td'','''','
+					--Set the table header field to be the field name's alias
+					SET @tblfieldheader = @tblfieldheader + '<th>' + RIGHT(@tempfield,CHARINDEX(' sa ',REVERSE(@tempfield))-1) + '</th>'
+				END
+			--Increment the counter.
+			SET @i += 1
+		END
+	--Trim the extra four characters of the end of @sql.      
+	SET @sql = LEFT(@sql, LEN(@sql)-4)
+	--Add the from, where, group by, having, and order by clause to the select statement.
+	SET @sql = @sql + ' ' + @qFROM + ' ' + @qWHERE + ' ' +  @qGroupBy + ' ' + @qHaving + ' ' + @qOrderBy
+	--Put the set xml command around the sql statement.
+	SET @sql = 'SET @XML = CAST(( ' + @sql + ' FOR XML PATH(''tr''),ELEMENTS ) AS NVARCHAR(MAX))'
+	--Run the sql that will create the xml.
+	EXEC sp_executesql @sql, N'@xml nvarchar(max) output', @xml OUTPUT
+	
+	--Create the body of the email, which contains the xml results of the query.
+	SET @body = '<html><body><H3>' + @Title + '</H3><table border = 1><tr>' + @tblfieldheader + '</tr>' + @xml + '</table></body></html>'
+
+	--Drop the fields temp table.
+	DROP TABLE #Fields
+
+	--Set the variable that will be tested to verify there was at least one result.
+	SET @resultexist = 'IF NOT EXISTS(SELECT TOP 1 1 ' + @qFROM + ' ' + @qWHERE + ' ' + @qGroupBy + ' ' + @qHaving + ') SET @SendEmail = 0 ELSE SET @SendEmail = 1'
+	--Capture whether or not any rows were returned
+	exec sp_executesql @resultexist, N'@SendEmail int output', @SendEmail OUTPUT
+	--Check the variable.
+	IF @SendEmail = 1
+		BEGIN  
+		--If rows were returned, send the email.
+		EXEC msdb.dbo.sp_send_dbmail
+				@recipients = @recipients,
+				@subject = @subject,
+				@body = @body,
+				@body_format = 'HTML';
+		END
+
+END
