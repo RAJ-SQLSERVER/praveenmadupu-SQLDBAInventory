@@ -1,0 +1,35 @@
+  -- 
+-- Purpose : Get Server version Info - Run on CMS for each Server Group 
+-- By: Mark Huber - Sept 10, 2015 
+-- 
+DECLARE @sqlVers NUMERIC(4, 2) 
+
+SELECT @sqlVers = LEFT(Cast(Serverproperty('productversion') AS VARCHAR), 4) 
+
+SELECT CASE @sqlVers 
+         WHEN 7.00 THEN 'SQL Server 7' 
+         WHEN 8.00 THEN 'SQL Server 2000' 
+         WHEN 9.00 THEN 'SQL Server 2005' 
+         WHEN 10.00 THEN 'SQL Server 2008' 
+         WHEN 10.50 THEN 'SQL Server 2008 R2' 
+         WHEN 11.00 THEN 'SQL Server 2012' 
+         WHEN 12.00 THEN 'SQL Server 2014' 
+         WHEN 13.00 THEN 'SQL Server 2016' 
+         ELSE 'UnKnown/Unsupported SQL Server Version' 
+       END                                          AS SqlServerType, 
+       Serverproperty('ProductVersion')             AS ProductVersion, 
+       Serverproperty('ProductLevel')               AS ProductLevel, 
+       Serverproperty('Edition')                    AS Edition, 
+       Serverproperty('ResourceLastUpdateDateTime') AS LastUpdateDateTime, 
+       CASE RIGHT(Substring(@@VERSION, Charindex('Windows NT', @@VERSION), 14), 
+            3) 
+         WHEN '5.0' THEN 'Windows 2000' 
+         WHEN '5.1' THEN 'Windows XP' 
+         WHEN '5.2' THEN 'Windows Server 2003 R2' 
+         WHEN '6.0' THEN 'Windows Server 2008' 
+         WHEN '6.1' THEN 'Windows Server 2008 R2' 
+         WHEN '6.2' THEN 'Windows Server 2012' 
+         ELSE 'UnKnown Windows OS Type' 
+       END                                          AS OSVersion 
+
+go
