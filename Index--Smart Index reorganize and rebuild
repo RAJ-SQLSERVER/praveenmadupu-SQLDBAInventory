@@ -1,0 +1,191 @@
+--Index reorganize and rebuild
+--https://www.sqlservercentral.com/scripts/flexible-index-reorganize-and-rebuild
+==================================================================================================
+This procedure will find most fragmented and most accessed indexes server wide. and then rebuild or reorganize depending on your parameters.
+
+So it will alter/list only the indexes which you will get the most benefit of fixing defragmentation.
+
+Important Note : This procedure can create extensive IO operations. Please check first in DEV environment and beware that altering indexes can also create locks. That's why please use it with caution in PRD environments. Please try to exclude every unnecessary database name in WHERE clause and try to reduce the load.
+
+Please create the stored procedure
+Execute the procedure in debug mode first: EXEC sp_FlexibleReindex @Debug=1  this will only list the indexes sorted by most benefit
+Please execute the procedure with the parameters that satisfy your needs
+=================================================================================================
+ CREATE PROCEDURE sp_FlexibleReindex 
+	@MaxExecutionTime int = 10, -- Script will stop if execution time exceeds this parameter (in minutes)
+	@Debug tinyint = 1, -- Debug mode = 1, execution mode = 0... It prints only the statements in debug mode
+	@ConsoleMode tinyint = 1, -- If 1, It will also print additional messages at execution mode. It should be better to set as 0 when running with SQL Agent Job.
+	@MinFragmentationPercent tinyint = 8, -- Script will alter only the indexes if @FragmentationPercent >= @MinFragmentationPercent
+	@RebuildPercentage tinyint = 60, -- Script will rebuild the indexes if @FragmentationPercent >=  @RebuildPercentage else reorganize the indexes 
+	@AlterClusteredIndexes tinyint = 0, -- If 1 script will rebuild/reorganize also clustered indexes. if 0, it will skip clustered indexes.
+	@MinPageCount smallint = 200, -- Script will ignore indexes which hass less page numbers than @MinPageCount. If @@MinPageCount is NULL scprit will ignore this filter...
+	@LastAccessed smallint = 7 -- In days... Script will consider the only indexes which are accessed in last @LastAccessed days. If @LastAccessed is NULL scprit will ignore this filter...
+AS
+
+BEGIN
+
+
+	-- Internal variables
+	DECLARE @Counter int = 0
+	DECLARE @FragmentationPercent float
+	DECLARE @DatabaseId int 
+	DECLARE @DatabaseName sysname 
+	DECLARE @AllStartTime datetime = GETDATE()
+	DECLARE @AlterIndexStartTime datetime 
+	DECLARE @FullTableName	NVARCHAR(500)
+	DECLARE @SQL NVARCHAR(MAX)
+	DECLARE @IndexSQL NVARCHAR(MAX)
+	DECLARE @LastAccessedDate VARCHAR(100) = CONVERT(VARCHAR(100), DATEADD(DAY, -@LastAccessed, GETDATE()), 120);
+
+	SET NOCOUNT ON;
+	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	CREATE TABLE #IndexStats(
+		[DatabaseId] [int] NOT NULL,
+		[DatabaseName] [sysname] NOT NULL,
+		[SchemaName] [sysname] NOT NULL,
+		[TableName] [sysname] NOT NULL,
+		[IndexName] [sysname] NULL,
+		[AvgFragmentationPercent] [float] NULL,
+		[PageCounts] [bigint] NULL,
+		[IndexType] [nvarchar](60) NULL,
+		[ObjectId] [int] NOT NULL,
+		[UserSeeks] [bigint] NULL,
+		[UserScans] [bigint] NULL,
+		[UserLookups] [bigint] NULL,
+		[LastUserSeek] [datetime] NULL,
+		[LastUserScan] [datetime] NULL,
+		[LastUserLookup] [datetime] NULL,
+		[LastUserUpdate] [datetime] NULL,
+		[FullTableName] AS ('[' + DatabaseName + '].[' + SchemaName  +'].[' + TableName + ']')
+	)
+
+	-- Here you can change the query to fetch the only databases which we want to alter their indexes
+	DECLARE Db_Cursor CURSOR FOR  
+	SELECT database_id, name FROM sys.databases
+	WHERE name NOT IN ('master','model','msdb','tempdb', 'distribution')   AND is_read_only <> 1
+
+	OPEN Db_Cursor  
+	FETCH NEXT FROM Db_Cursor INTO @DatabaseId, @DatabaseName  
+
+	WHILE @@FETCH_STATUS = 0  
+	BEGIN  
+
+		SET @SQL = '
+		INSERT #IndexStats
+		SELECT 
+			DatabaseId = ' + CONVERT (VARCHAR(10), @DatabaseId) + ',
+			DatabaseName = ''' + @DatabaseName +''',
+			SchemaName = dbschemas.[name], 
+			TableName = dbtables.[name], 
+			IndexName = dbindexes.[name],
+			AvgFragmentationPercent = indexstats.avg_fragmentation_in_percent,
+			PageCounts = indexstats.page_count,
+			IndexType = dbindexes.type_desc,
+			ObjectId = dbindexes.object_id,
+			UserSeeks = IndexUsage.user_seeks,
+			UserScans = IndexUsage.user_scans,
+			UserLookups = IndexUsage.user_lookups,
+			LastUserSeek = IndexUsage.last_user_seek,
+			LastUserScan = IndexUsage.last_user_scan,
+			LastUserLookup = IndexUsage.last_user_lookup,
+			LastUserUpdate = IndexUsage.last_user_update
+		FROM sys.dm_db_index_physical_stats (' + CONVERT(VARCHAR(10), @DatabaseId)  +', NULL, NULL, NULL, NULL) AS indexstats 
+		INNER JOIN ' + @DatabaseName + '.sys.tables dbtables WITH (NOLOCK) on dbtables.[object_id] = indexstats.[object_id]
+		INNER JOIN ' + @DatabaseName + '.sys.schemas dbschemas WITH (NOLOCK) on dbtables.[schema_id] = dbschemas.[schema_id]
+		INNER JOIN ' + @DatabaseName + '.sys.indexes AS dbindexes WITH (NOLOCK) ON dbindexes.[object_id] = indexstats.[object_id] AND indexstats.index_id = dbindexes.index_id
+		LEFT JOIN sys.dm_db_index_usage_stats IndexUsage WITH (NOLOCK) ON IndexUsage.database_id = ' + CONVERT(VARCHAR(10), @DatabaseId) + ' AND IndexUsage.object_id = dbtables.object_id AND IndexUsage.index_id = dbindexes.index_id
+		'	
+		IF @AlterClusteredIndexes = 1
+			BEGIN
+				SET @SQL += 'WHERE dbindexes.type_desc IN (''CLUSTERED'', ''NONCLUSTERED'')'
+			END
+		ELSE
+			BEGIN
+				SET @SQL += 'WHERE dbindexes.type_desc = ''NONCLUSTERED'''
+			END
+		--PRINT @SQL
+		SET @SQL += ' AND indexstats.avg_fragmentation_in_percent >= ' + CONVERT(VARCHAR(10), @MinFragmentationPercent)
+		IF @MinPageCount is not NULL 
+			BEGIN
+				SET @SQL += ' AND indexstats.page_count >= ' + CONVERT(VARCHAR(10), @MinPageCount)
+			END
+		IF @LastAccessed is not NULL 
+			BEGIN
+				SET @SQL += ' AND (IndexUsage.last_user_seek >= ''' +  @LastAccessedDate + ''' '
+				SET @SQL += ' OR IndexUsage.last_user_scan >= ''' +  @LastAccessedDate + ''' '
+				SET @SQL += ' OR IndexUsage.last_user_lookup >= ''' +  @LastAccessedDate + ''') '
+			END
+
+		EXECUTE sp_executesql  @SQL
+		FETCH NEXT FROM Db_Cursor INTO @DatabaseId, @DatabaseName  
+	END  
+
+	CLOSE Db_Cursor  
+	DEALLOCATE Db_Cursor 
+
+	IF @Debug = 1
+		BEGIN
+			SELECT *, IndexAction = CASE WHEN AvgFragmentationPercent >= @MinFragmentationPercent THEN CASE WHEN AvgFragmentationPercent >= @RebuildPercentage THEN 'REBUILD' ELSE 'REORGANIZE' END ELSE NULL END FROM #IndexStats S
+			ORDER BY (AvgFragmentationPercent * PageCounts * (UserSeeks + UserScans + UserLookups) ) / 100 DESC
+		END
+
+	-- Reorganize the indexes by the most fragmented and most accessed
+	DECLARE Index_Cursor CURSOR FOR  
+	SELECT 
+		FullTableName,
+		AvgFragmentationPercent, 
+		AlterIndexStatement = 'ALTER INDEX [' + IndexName + + '] ON ' + S.FullTableName + CASE WHEN AvgFragmentationPercent >= @RebuildPercentage THEN ' REBUILD' ELSE ' REORGANIZE' END
+	FROM #IndexStats S
+	ORDER BY (AvgFragmentationPercent * PageCounts * (UserSeeks + UserScans + UserLookups) ) / 100 DESC
+	OPEN Index_Cursor
+	FETCH NEXT FROM Index_Cursor INTO @FullTableName, @FragmentationPercent, @IndexSQL
+
+
+	WHILE @@FETCH_STATUS = 0  
+	BEGIN  
+
+		IF DATEDIFF(second, @AllStartTime, GETDATE()) >= (@MaxExecutionTime * 60)
+			BEGIN
+				BREAK;
+			END
+
+		SET @Counter += 1;
+
+		IF @Debug = 1
+			BEGIN
+				PRINT @IndexSQL
+				PRINT '---------------------------------'
+				PRINT ''
+			END
+		ELSE
+			BEGIN
+				SET @AlterIndexStartTime = GETDATE()
+				IF @ConsoleMode = 1
+					BEGIN
+						PRINT CONVERT(VARCHAR(23), @AlterIndexStartTime, 120) + ' altering index ' + @FullTableName
+						PRINT 'Index statement: ' + @IndexSQL
+					END
+
+				EXECUTE sp_executesql  @IndexSQL;
+
+
+				IF @ConsoleMode = 1
+					BEGIN
+						PRINT CONVERT(VARCHAR(23), GETDATE(), 120) + ' index altered in ' + CONVERT(VARCHAR(10), DATEDIFF(second, @AlterIndexStartTime, GETDATE())) + ' seconds'
+						PRINT '---------------------------------------------------------------------------------------'
+						PRINT ''
+					END
+
+			END
+
+		FETCH NEXT FROM Index_Cursor INTO  @FullTableName, @FragmentationPercent, @IndexSQL
+
+	END  
+	CLOSE Index_Cursor
+	DEALLOCATE Index_Cursor
+
+
+	DROP TABLE #IndexStats;
+
+END
