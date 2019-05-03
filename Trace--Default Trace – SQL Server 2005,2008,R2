@@ -1,0 +1,19 @@
+--Default Trace – SQL Server 2005,2008,R2
+
+SELECT
+ status, 
+ path, 
+ max_size, 
+ buffer_count, 
+ buffer_size, 
+ event_count, 
+ dropped_event_count 
+FROM sys.traces 
+
+Then from the result, copy the path of the trace file from path column and paste into the below query and execute it.
+
+SELECT SPID,LoginName,StartTime,reads,writes,servername, sessionloginname,TextData,ClientProcessID,ApplicationName
+FROM fn_trace_gettable('"S:\Microsoft SQL Server\MSSQL.1\MSSQL\LOG\log_16303.trc', 1)
+
+If you check in the physical path folder you all see multiple trace files with names like "log_16303.trc" ordered by date and time.
+
