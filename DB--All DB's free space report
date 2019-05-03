@@ -1,0 +1,173 @@
+--Database size, used space, free space
+EXEC master.[dbo].[proc_ShowDbSpaceUsage] @User = NULL;
+
+GO
+USE [master]
+GO
+/****** 
+Objective	: Get database size, used space, free space within an instance of SQL Server (version 2012)
+Date		: 22/04/2014
+Author		: Trevor Makoni
+
+Updated		: 15/10/2014
+******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+IF (SELECT OBJECT_ID('[dbo].[proc_ShowDbSpaceUsage]')) IS NOT NULL
+	DROP PROCEDURE [dbo].[proc_ShowDbSpaceUsage];
+GO
+CREATE PROCEDURE [dbo].[proc_ShowDbSpaceUsage](@User varchar(250)=null)
+AS
+BEGIN;
+SET NOCOUNT ON;
+SET @User = LTRIM(RTRIM(ISNULL(@User, '')));
+DECLARE @domain table(name varchar(250), domain varchar(250));
+
+DECLARE @T TABLE(NUID INT IDENTITY(1,1), dbName SYSNAME);
+DECLARE @RESULT			TABLE (
+	[Database Name]		VARCHAR(500),
+	[File Type]			VARCHAR(150),
+	[File Name]			VARCHAR(500),
+	[Disk Drive]		VARCHAR(10),
+	[File Path]			VARCHAR(500),
+	[File Size (MB)]	INT,
+	[Space Used (MB)]	INT,
+	[Free Space (MB)]	INT,
+	[% Free]			DECIMAL(12,2),
+	[Created]			DATETIME,
+	[Modified]			DATETIME,
+	[Owner]				VARCHAR(500));
+DECLARE
+	@i INT = 1,
+	@db	SYSNAME,
+	@SQL	VARCHAR(MAX);
+
+INSERT INTO @domain
+	EXEC master.dbo.xp_loginconfig 'default domain';
+
+IF @User <> ''
+	IF @User NOT LIKE '%\%'
+	BEGIN;
+		SET @User = (select domain from @domain )+'\' + @User; 
+	END;
+
+INSERT INTO @T
+(dbName)
+SELECT name
+FROM         sys.databases
+WHERE state_desc = 'ONLINE';
+
+WHILE @i <= (SELECT COUNT(1) FROM @T)
+BEGIN;
+	SELECT @db = dbName FROM @T WHERE NUID = @i;
+
+IF @User <> ''
+SET @SQL = '
+	USE ['+@db+'];
+	WITH info AS
+	(
+		SELECT        
+			s.TABLE_CATALOG, 
+			MIN(o.create_date) AS create_date, 
+			MAX(o.modify_date) AS modify_date
+		FROM            sys.objects AS o INNER JOIN
+								 sys.tables AS t ON t.object_id = o.object_id INNER JOIN
+								 INFORMATION_SCHEMA.TABLES AS s ON s.TABLE_NAME = t.name
+		GROUP BY s.TABLE_CATALOG
+	), obj AS
+	(
+		SELECT       
+			a.name, 
+			UPPER(RIGHT(a.filename,CHARINDEX(''.'',REVERSE(a.filename)) - 1)) AS FileType, 
+			UPPER(LEFT(a.filename, 1)) AS Drive, 
+			a.filename, 
+			CONVERT(decimal(12, 2), ROUND(a.size / 128.000, 2)) AS FileSizeMB, 
+			CONVERT(decimal(12, 2), ROUND(FILEPROPERTY(a.name, ''SpaceUsed'') / 128.000, 2)) AS SpaceUsedMB, 
+			CONVERT(decimal(12, 2), ROUND((a.size - FILEPROPERTY(a.name, ''SpaceUsed'')) / 128.000, 2)) AS FreeSpaceMB, 
+			info.create_date AS Created, 
+			info.modify_date AS Modified, 
+			SUSER_SNAME(b.owner_sid) AS Owner
+		FROM            sys.sysfiles AS a LEFT OUTER JOIN
+								 sys.databases AS b ON '''+@db+''' = b.name COLLATE Latin1_General_CI_AS LEFT OUTER JOIN
+									 info ON info.TABLE_CATALOG = b.name COLLATE Latin1_General_CI_AS
+		WHERE        (suser_sname(owner_sid) = '''+@User+''') AND (b.state_desc = ''ONLINE'')
+	)
+	SELECT
+		dbName = '''+@db+''' ,
+		filetype,
+		name,
+		Drive,
+		filename,
+		FileSizeMB,
+		SpaceUsedMB,
+		FreeSpaceMB,
+		CONVERT(decimal(12, 2), 100 * (SpaceUsedMB / FileSizeMB)) AS [% Free],
+		Created,
+		Modified,
+		Owner
+	FROM obj;';
+ELSE
+SET @SQL = '
+	USE ['+@db+'];
+	WITH info AS
+	(
+		SELECT        
+			s.TABLE_CATALOG, 
+			MIN(o.create_date) AS create_date, 
+			MAX(o.modify_date) AS modify_date
+		FROM            sys.objects AS o INNER JOIN
+								 sys.tables AS t ON t.object_id = o.object_id INNER JOIN
+								 INFORMATION_SCHEMA.TABLES AS s ON s.TABLE_NAME = t.name
+		GROUP BY s.TABLE_CATALOG
+	), obj AS
+	(
+		SELECT       
+			a.name, 
+			UPPER(RIGHT(a.filename,CHARINDEX(''.'',REVERSE(a.filename)) - 1)) AS FileType, 
+			UPPER(LEFT(a.filename, 1)) AS Drive, 
+			a.filename, 
+			CONVERT(decimal(12, 2), ROUND(a.size / 128.000, 2)) AS FileSizeMB, 
+			CONVERT(decimal(12, 2), ROUND(FILEPROPERTY(a.name, ''SpaceUsed'') / 128.000, 2)) AS SpaceUsedMB, 
+			CONVERT(decimal(12, 2), ROUND((a.size - FILEPROPERTY(a.name, ''SpaceUsed'')) / 128.000, 2)) AS FreeSpaceMB, 
+			info.create_date AS Created, 
+			info.modify_date AS Modified, 
+			SUSER_SNAME(b.owner_sid) AS Owner
+		FROM            sys.sysfiles AS a LEFT OUTER JOIN
+								 sys.databases AS b ON '''+@db+''' = b.name COLLATE Latin1_General_CI_AS LEFT OUTER JOIN
+									 info ON info.TABLE_CATALOG = b.name COLLATE Latin1_General_CI_AS
+		WHERE       (b.state_desc = ''ONLINE'')
+	)
+	SELECT
+		dbName = '''+@db+''' ,
+		filetype,
+		name,
+		Drive,
+		filename,
+		FileSizeMB,
+		SpaceUsedMB,
+		FreeSpaceMB,
+		CONVERT(decimal(12, 2), 100 * (SpaceUsedMB / FileSizeMB)) AS [% Free],
+		Created,
+		Modified,
+		Owner
+	FROM obj;';
+	
+INSERT INTO @RESULT
+EXEC (@SQL);
+SET @i += 1;
+
+END;
+
+SELECT *
+FROM @RESULT
+ORDER BY [Free Space (MB)] DESC;
+SET NOCOUNT OFF;
+END;
+GO
+EXEC [dbo].[proc_ShowDbSpaceUsage];
+GO
+IF (SELECT OBJECT_ID('[dbo].[proc_ShowDbSpaceUsage]')) IS NOT NULL
+	DROP PROCEDURE [dbo].[proc_ShowDbSpaceUsage];
+GO
