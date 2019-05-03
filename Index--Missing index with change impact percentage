@@ -1,0 +1,73 @@
+--Missing index with change impact percentage\
+go
+/*
+Description:- This Query will provide you detail of missing indexes on a table and also 
+			  prepare sql script for new index
+Author:- Arun Kumar
+Email:- arun_kumar112@yahoo.co.in,arun.kumar@iqor.com
+Mobile:- 9811539923
+*/
+SELECT
+DISTINCT
+   @@SERVERNAME AS [ServerName]
+   , DB_NAME() AS [DatabaseName]
+   , SCHEMA_NAME([systemObject].[schema_id]) AS [SchemaName]
+	,[systemObject].Object_ID AS ObjectID
+   , [systemObject].[name] AS [ObjectName]
+   , CASE [systemObject].[type]
+      WHEN 'U' THEN 'Table'
+      WHEN 'V' THEN 'View'
+      ELSE 'Unknown'
+     END AS [ObjectType]
+   , [MissingIndexDetail].[equality_columns] AS [EqualityColumns]
+   , [MissingIndexDetail].[inequality_columns] AS [InequalityColumns]
+   , [MissingIndexDetail].[included_columns] AS [IncludedColumns]
+   , [MissingIndexGroupState].[user_seeks] AS [ExpectedIndexSeeksByUserQueries]
+   , [MissingIndexGroupState].[user_scans] AS [ExpectedIndexScansByUserQueries]
+   , [MissingIndexGroupState].[last_user_seek] AS [ExpectedLastIndexSeekByUserQueries]
+   , [MissingIndexGroupState].[last_user_scan] AS [ExpectedLastIndexScanByUserQueries]
+   , [MissingIndexGroupState].[avg_total_user_cost] AS [ExpectedAvgUserQueriesCostReduction]
+   , [MissingIndexGroupState].[avg_user_impact] AS [ExpectedAvgUserQueriesBenefitPct],
+   IndexName='[ix_' + tbl.name + N'_' 
+                    + REPLACE(REPLACE(REPLACE(REPLACE(
+                        ISNULL(equality_columns,N'')+ 
+                        CASE WHEN equality_columns IS NOT NULL AND inequality_columns IS NOT NULL THEN N'_' ELSE N'' END
+                        + ISNULL(inequality_columns,''),',','')
+                        ,'[',''),']',''),' ','_') 
+                    + CASE WHEN included_columns IS NOT NULL THEN N'_includes' ELSE N'' END + N']' ,
+
+     IndexCreateScripts=N'CREATE INDEX [ix_' + tbl.name + N'_' 
+                    + REPLACE(REPLACE(REPLACE(REPLACE(
+                        ISNULL(equality_columns,N'')+ 
+                        CASE WHEN equality_columns IS NOT NULL AND inequality_columns IS NOT NULL THEN N'_' ELSE N'' END
+                        + ISNULL(inequality_columns,''),',','')
+                        ,'[',''),']',''),' ','_') 
+                    + CASE WHEN included_columns IS NOT NULL THEN N'_includes' ELSE N'' END + N'] ON ' 
+                    + [statement] + N' (' + ISNULL(equality_columns,N'')
+                    + CASE WHEN equality_columns IS NOT NULL AND inequality_columns IS NOT NULL THEN N', ' ELSE N'' END
+                    + CASE WHEN inequality_columns IS NOT NULL THEN inequality_columns ELSE N'' END + 
+                    ') ' + CASE WHEN included_columns IS NOT NULL THEN N' INCLUDE (' + included_columns + N')' ELSE N'' END
+                    + N' WITH (' 
+                        + N'FILLFACTOR=80, ONLINE=ON' 
+                    + N')'
+                    + N';'
+FROM 
+   [sys].[dm_db_missing_index_details] AS [MissingIndexDetail]
+   CROSS APPLY sys.dm_db_missing_index_columns  ([MissingIndexDetail].index_handle)
+   LEFT JOIN [sys].[dm_db_missing_index_groups] AS [MissingIndexGroup]
+      ON [MissingIndexDetail].[index_handle] = [MissingIndexGroup].[index_handle]
+   LEFT JOIN [sys].[dm_db_missing_index_group_stats] AS [MissingIndexGroupState]
+      ON [MissingIndexGroup].[index_group_handle] = [MissingIndexGroupState].[group_handle]
+   INNER JOIN [sys].[objects] AS [systemObject]
+      ON [MissingIndexDetail].[object_id] = [systemObject].[object_id]
+inner join sys.databases db on [MissingIndexDetail].database_id=db.database_id
+inner join sys.tables tbl on [systemObject].object_id=tbl.object_id
+WHERE
+   [MissingIndexDetail].[database_id] = DB_ID()  -- Look in the Current Database
+   AND [systemObject].[type] IN ('U','V')     -- Look in Tables & Views
+   AND [systemObject].[is_ms_shipped] = 0x0   -- Exclude System Generated Objects
+   --and( tbl.name like '%Accounting%' or tbl.name like '%treasury%') --Add table name for filter
+and [MissingIndexGroupState].[avg_user_impact]>=80; -- filter impact percentage 
+
+
+go
