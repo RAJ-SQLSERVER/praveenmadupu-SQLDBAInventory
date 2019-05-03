@@ -1,0 +1,155 @@
+--Registered server documenter
+--https://www.sqlservercentral.com/scripts/registered-server-documenter
+==========================================================
+-- Internal variables
+DECLARE @SQL NVarchar(4000)
+, @PhyMB NVarchar(100)
+, @BPool_Com NVarchar(100)
+, @BPool_Tgt NVarchar(100)
+, @BPool_Vis NVarchar(100)
+, @VMType NVarchar(100)
+-- DMVs column names and availability can differ between versions. 
+-- The differences can be taken into account here. 
+-- Create other variables for other columns.
+IF SUBSTRING(@@VERSION, 22, 4) >= 2012
+BEGIN
+SET @PhyMB = N'CAST(OSI.physical_memory_kb / 1024.0 / 1024.0 AS Dec(9,2))'
+SET @BPool_Com = N'CAST(committed_kb / 128.0 / 1024 AS Dec(9,2))'
+SET @BPool_Tgt = N'CAST(committed_target_kb / 128.0 / 1204 AS Dec(9,2))'
+SET @BPool_Vis = N'CAST(visible_target_kb / 128.0 /1024 AS Dec(9,2))'
+SET @VMType = N'virtual_machine_type_desc'
+END
+ELSE
+BEGIN
+SET @PhyMB = N'CAST(OSI.physical_memory_in_bytes / 1024.0 / 1024.0 / 1024.0 AS Dec(9,2))'
+SET @BPool_Com = N'CAST(bpool_committed / 128.0 / 1024 AS Dec(9,2))'
+SET @BPool_Tgt = N'CAST(bpool_commit_target / 128.0 / 1204 AS Dec(9,2))'
+SET @BPool_Vis = N'CAST(bpool_visible / 128.0 /1024 AS Dec(9,2))'
+SET @VMType = N'''column not supported in this version of SQL''' 
+END
+-- Add the variables into the query
+SET @SQL = 
+N';WITH Config
+AS
+(
+SELECT MachineName = SERVERPROPERTY(''MachineName'')
+, InstanceName = SERVERPROPERTY(''ServerName'')
+, [Edition] = ''' + SUBSTRING(@@VERSION, 22, 4) + ' '' + CAST(SERVERPROPERTY(''Edition'') AS Varchar(30))
+, [Version] = SERVERPROPERTY(''ProductVersion'')
+, [Level] = SERVERPROPERTY(''ProductLevel'')
+, DBCnt = (SELECT COUNT(1) FROM sys.Databases)
+, TotalDBSizeGB = (SELECT CAST(SUM(Size) / 128.0 / 1024 AS Dec(9,2))  FROM sys.master_files) -- Ex filestream
+, Collation = SERVERPROPERTY(''Collation'')
+, IsFullTextInstalled = SERVERPROPERTY(''IsFullTextInstalled'')
+, IsHadrEnabled = SERVERPROPERTY(''IsHadrEnabled'')
+, MinRAMMB = MAX(CASE WHEN Name = ''min server memory (MB)'' THEN Value_in_use END)
+, MaxRAMMB = MAX(CASE WHEN Name = ''max server memory (MB)'' THEN Value_in_use END)
+, CostParallelism = MAX(CASE WHEN Name = ''cost threshold for parallelism'' THEN Value_in_use END)
+, DegreeParallelism = MAX(CASE WHEN Name = ''max degree of parallelism'' THEN Value_in_use END)
+, RemoteAdminConn = MAX(CASE WHEN Name = ''remote admin connections'' THEN Value_in_use END)
+, AllowXPCmdShell = MAX(CASE WHEN Name = ''xp_cmdshell'' THEN Value_in_use END)
+FROM sys.Configurations C
+--SELECT * FROM sys.Configurations C
+)
+, OSI
+AS
+(
+SELECT SvrName = @@SERVERNAME
+, LastSvrReboot = DATEADD(SECOND, -1 * (OSI.ms_ticks / 1000), GETDATE())
+, SvrUptime = LEFT(CONVERT(Varchar(20), DATEADD(SECOND, (OSI.ms_ticks / 1000), 0), 114), LEN(CONVERT(Varchar(20), DATEADD(SECOND, (OSI.ms_ticks / 1000), 0), 114)) - 4)
+, LastSQLRestart = sqlserver_start_time
+, SQLUptime = LEFT(CONVERT(Varchar(20), DATEADD(SECOND, DATEDIFF(SECOND, sqlserver_start_time, GETDATE()), 0), 114), LEN(CONVERT(Varchar(20), DATEADD(SECOND, DATEDIFF(SECOND, sqlserver_start_time, GETDATE()), 0), 114)) - 4)
+, CPUCnt = OSI.cpu_count
+, VirtualCoresPerCPU = OSI.hyperthread_ratio
+, ServerRamGB = ' + @PhyMB + '
+, BPoolCommittedGB = ' + @BPool_Com + '
+, BPoolTargetGB = ' + @BPool_Tgt + '
+, BPoolVisibleGB = ' + @BPool_Vis + '
+, VirtualMachineType = ' + @VMType + '
+FROM sys.dm_os_sys_info OSI
+)
+SELECT *
+FROM Config C
+JOIN OSI
+ON C.InstanceName = OSI.SvrName'
+-- Run the query
+EXEC sp_ExecuteSQL @SQL
+==============================================================
+
+-- Internal variables
+DECLARE @SQL			NVarchar(4000)
+		, @PhyMB		NVarchar(100)
+		, @BPool_Com	NVarchar(100)
+		, @BPool_Tgt	NVarchar(100)
+		, @BPool_Vis	NVarchar(100)
+		, @VMType		NVarchar(100)
+
+-- DMVs column names and availability can differ between versions. 
+-- The differences can be taken into account here. 
+-- Create other variables for other columns.
+IF SUBSTRING(@@VERSION, 22, 4) >= 2012
+BEGIN
+	SET @PhyMB		= N'CAST(OSI.physical_memory_kb / 1024.0 / 1024.0 AS Dec(9,2))'
+	SET @BPool_Com	= N'CAST(committed_kb / 128.0 / 1024 AS Dec(9,2))'
+	SET @BPool_Tgt	= N'CAST(committed_target_kb / 128.0 / 1204 AS Dec(9,2))'
+	SET @BPool_Vis	= N'CAST(visible_target_kb / 128.0 /1024 AS Dec(9,2))'
+	SET @VMType		= N'virtual_machine_type_desc'
+END
+ELSE
+BEGIN
+	SET @PhyMB		= N'CAST(OSI.physical_memory_in_bytes / 1024.0 / 1024.0 / 1024.0 AS Dec(9,2))'
+	SET @BPool_Com	= N'CAST(bpool_committed / 128.0 / 1024 AS Dec(9,2))'
+	SET @BPool_Tgt	= N'CAST(bpool_commit_target / 128.0 / 1204 AS Dec(9,2))'
+	SET @BPool_Vis	= N'CAST(bpool_visible / 128.0 /1024 AS Dec(9,2))'
+	SET @VMType		= N'''column not supported in this version of SQL''' 
+END
+
+-- Add the variables into the query
+SET @SQL = 
+N';WITH Config
+AS
+(
+SELECT	MachineName				= SERVERPROPERTY(''MachineName'')
+		, InstanceName			= SERVERPROPERTY(''ServerName'')
+		, [Edition] = ''' + CASE WHEN SUBSTRING(@@VERSION, 27, 2) = 'R2' THEN SUBSTRING(@@VERSION, 22, 7) ELSE SUBSTRING(@@VERSION, 22, 4) END + ' '' + CAST(SERVERPROPERTY(''Edition'') AS Varchar(30))
+		, [Version]				= SERVERPROPERTY(''ProductVersion'')
+		, [Level]				= SERVERPROPERTY(''ProductLevel'')
+		, DBCnt					= (SELECT COUNT(1) FROM sys.Databases)
+		, TotalDBSizeGB			= (SELECT CAST(SUM(Size) / 128.0 / 1024 AS Dec(9,2))  FROM sys.master_files) -- Ex filestream
+		, Collation				= SERVERPROPERTY(''Collation'')
+		, IsFullTextInstalled	= SERVERPROPERTY(''IsFullTextInstalled'')
+		, IsHadrEnabled			= SERVERPROPERTY(''IsHadrEnabled'')
+		, MinRAMMB				= MAX(CASE WHEN Name = ''min server memory (MB)'' THEN Value_in_use END)
+		, MaxRAMMB				= MAX(CASE WHEN Name = ''max server memory (MB)'' THEN Value_in_use END)
+		, CostParallelism		= MAX(CASE WHEN Name = ''cost threshold for parallelism'' THEN Value_in_use END)
+		, DegreeParallelism		= MAX(CASE WHEN Name = ''max degree of parallelism'' THEN Value_in_use END)
+		, RemoteAdminConn		= MAX(CASE WHEN Name = ''remote admin connections'' THEN Value_in_use END)
+		, AllowXPCmdShell		= MAX(CASE WHEN Name = ''xp_cmdshell'' THEN Value_in_use END)
+FROM	sys.Configurations C
+--SELECT	* FROM	sys.Configurations C
+)
+, OSI
+AS
+(
+SELECT	SvrName					= @@SERVERNAME
+		, LastSvrReboot			= DATEADD(SECOND, -1 * (OSI.ms_ticks / 1000), GETDATE())
+		, SvrUptime				= LEFT(CONVERT(Varchar(20), DATEADD(SECOND, (OSI.ms_ticks / 1000), 0), 114), LEN(CONVERT(Varchar(20), DATEADD(SECOND, (OSI.ms_ticks / 1000), 0), 114)) - 4)
+		, LastSQLRestart		= sqlserver_start_time
+		, SQLUptime				= LEFT(CONVERT(Varchar(20), DATEADD(SECOND, DATEDIFF(SECOND, sqlserver_start_time, GETDATE()), 0), 114), LEN(CONVERT(Varchar(20), DATEADD(SECOND, DATEDIFF(SECOND, sqlserver_start_time, GETDATE()), 0), 114)) - 4)
+		, CPUCnt				= OSI.cpu_count
+		, VirtualCoresPerCPU	= OSI.hyperthread_ratio
+		, ServerRamGB			= ' + @PhyMB + '
+		, BPoolCommittedGB		= ' + @BPool_Com + '
+		, BPoolTargetGB			= ' + @BPool_Tgt + '
+		, BPoolVisibleGB		= ' + @BPool_Vis + '
+		, VirtualMachineType	= ' + @VMType + '
+FROM	sys.dm_os_sys_info OSI
+)
+SELECT	*
+FROM	Config C
+		JOIN OSI
+			ON C.InstanceName = OSI.SvrName'
+
+-- Run the query
+EXEC sp_ExecuteSQL @SQL
+--PRINT @SQL
