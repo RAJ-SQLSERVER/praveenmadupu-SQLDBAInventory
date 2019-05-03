@@ -1,0 +1,440 @@
+--DB Blocking Automated E-mail Alerting with Blocker SP ID & query's
+--https://www.sqlservercentral.com/scripts/db-blocking-automated-e-mail-alerting-with-blocker-sp-id-querys
+==========================================================================================================
+step 1.  To enable the blocking alert, you have to create the one monitoring DB with any name, replace the name accordingly in script
+step 2. create the table DBA_Block_SP_ID
+step 3. Create the Procedure DBA_spWho2CaptureAlert_Blocking with required change like email ID
+step 4. Create the procedure DBA_spSendMail with required mail profile update
+step 5. Create Job (Blocked SP_ID Alerts) 
+Job will be disabled default, please enable it after checking it end to and test it first at testing environments.
+==========================================================================================================
+USE [MonitorDB]
+GO
+
+/****** Object:  Table [dbo].[DBA_Block_SP_ID]   17-03-2018 ******/
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+SET ANSI_PADDING ON
+GO
+
+CREATE TABLE [dbo].[DBA_Block_SP_ID](
+	[SPID] [int] NULL,
+	[Status] [varchar](500) NULL,
+	[Login] [varchar](500) NULL,
+	[HOSTNAME] [varchar](500) NULL,
+	[BLKBY] [varchar](500) NULL,
+	[DBName] [varchar](500) NULL,
+	[Command] [varchar](500) NULL,
+	[CPUTime] [bigint] NULL,
+	[DiskIO] [bigint] NULL,
+	[LastBatch] [varchar](500) NULL,
+	[ProgramName] [varchar](500) NULL,
+	[SPID2] [bigint] NULL,
+	[REQUESTID] [int] NULL,
+	[dtCreated] [datetime] NOT NULL
+) ON [PRIMARY]
+
+GO
+
+SET ANSI_PADDING OFF
+GO
+
+
+
+
+
+--Create the Procedure
+
+USE [MonitorDB]
+GO
+/****** Object:  StoredProcedure [dbo].[DBA_spWho2CaptureAlert_Blocking]    Script Date: 22-03-2018 16:19:12 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+/*************************************************************************************
+AUTHOR:Subhash Chandra
+DATE:17-03-2018
+PURPOSECAPTURE SP_WHO2 DATA TO TABLE AND ALERT ABOUT BLOCKING
+
+TESTING:
+EXEC DBO.DBA_spWho2CaptureAlert_Blocking 
+@db = 'Master'
+, @TO = 'SOMEONE@SOMEWHERE.COM'
+
+SP_WHO2
+select * from DBA_Block_SP_ID 
+*************************************************************************************/
+CREATE PROCEDURE [dbo].[DBA_spWho2CaptureAlert_Blocking]
+@DB AS VARCHAR(500) = NULL
+, @TO VARCHAR(500) = NULL
+AS
+
+SET NOCOUNT ON;
+
+BEGIN TRY
+ DROP TABLE #WHO2
+END TRY
+BEGIN CATCH
+ --do nothing
+END CATCH
+
+CREATE TABLE #WHO2 (
+ SPID INT
+ , Status VARCHAR(500)
+ , [Login] VARCHAR(500)
+ , HOSTNAME VARCHAR(500)
+ , BLKBY VARCHAR(500)
+ , DBName VARCHAR(500)
+ , Command VARCHAR(500)
+ , CPUTime BIGINT
+ , DiskIO BIGINT
+ , LastBatch VARCHAR(500)
+ , ProgramName VARCHAR(500)
+ , SPID2 BIGINT
+ , REQUESTID INT
+ ) 
+
+  BEGIN
+ select count(*) as 'Total_active_sessions' from sys.dm_exec_requests where session_id>50
+  END
+DECLARE @SQL VARCHAR(MAX)
+SELECT @SQL = 'SP_WHO2'
+
+INSERT INTO #WHO2
+EXEC(@SQL)
+
+DELETE FROM DBA_Block_SP_ID
+WHERE dtcreated <= DATEADD(DAY,-14,GETDATE())
+
+INSERT INTO DBA_Block_SP_ID --SELECT * FROM DBA_Block_SP_ID
+(
+SPID
+, Status
+ , [Login]
+ , HOSTNAME
+ , BLKBY
+ , DBName
+ , Command
+ , CPUTime
+ , DiskIO
+ , LastBatch
+ , ProgramName
+ , SPID2
+ , REQUESTID
+, dtCreated
+)
+SELECT 
+SPID
+, Status
+ , [Login]
+ , HOSTNAME
+ , BLKBY
+ , DBName
+ , Command
+ , CPUTime
+ , DiskIO
+ , LastBatch
+ , ProgramName
+ , SPID2
+ , REQUESTID
+, GETDATE() [dtCreated]
+FROM #WHO2
+WHERE SPID IN (SELECT ISNULL(REPLACE(REPLACE(CAST(BLKBY AS VARCHAR),' ',''),'.',''),'') [SPID] FROM #WHO2)
+OR ISNULL(REPLACE(REPLACE(CAST(BLKBY AS VARCHAR),' ',''),'.',''),'') <> ''
+ORDER BY BLKBY, SPID
+
+DECLARE @RECCOUNT INT
+
+IF ISNULL(@DB,'') = ''
+ BEGIN
+SELECT @RECCOUNT = (
+SELECT COUNT(*)
+FROM #WHO2
+WHERE (SPID IN (SELECT ISNULL(REPLACE(REPLACE(CAST(BLKBY AS VARCHAR),' ',''),'.',''),'') [SPID] FROM #WHO2)
+OR ISNULL(REPLACE(REPLACE(CAST(BLKBY AS VARCHAR),' ',''),'.',''),'') <> '')
+AND (CAST(SPID AS VARCHAR) <> CAST(BLKBY AS VARCHAR)
+AND CAST(BLKBY AS VARCHAR) NOT LIKE '%.%')
+)
+ END
+ELSE
+ BEGIN
+SELECT @RECCOUNT = (
+SELECT COUNT(*)
+FROM #WHO2
+WHERE (SPID IN (SELECT ISNULL(REPLACE(REPLACE(CAST(BLKBY AS VARCHAR),' ',''),'.',''),'') [SPID] FROM #WHO2)
+OR ISNULL(REPLACE(REPLACE(CAST(BLKBY AS VARCHAR),' ',''),'.',''),'') <> '')
+AND (CAST(SPID AS VARCHAR) <> CAST(BLKBY AS VARCHAR)
+AND CAST(BLKBY AS VARCHAR) NOT LIKE '%.%'
+AND DBNAME = @DB)
+)
+ END
+
+IF @RECCOUNT > 0
+ BEGIN
+
+DECLARE @BODY VARCHAR(MAX)
+, @POS INT
+, @CNTR INT
+, @SPID VARCHAR(500)
+, @BLKBY VARCHAR(500)
+, @EventInfo VARCHAR(MAX)
+, @LASTSPID VARCHAR(500)
+, @LASTBLKBY VARCHAR(500)
+, @LOGIN VARCHAR(500)
+, @DBNAME VARCHAR(500)
+
+DECLARE @WHO2MAIL TABLE(
+[ID] INT IDENTITY(1,1)
+, SPID INT
+, BLKBY VARCHAR(500)
+, [LOGIN] VARCHAR(500)
+, [DBNAME] VARCHAR(500)
+) 
+
+INSERT INTO @WHO2MAIL(SPID, BLKBY, [LOGIN], [DBNAME])
+SELECT SPID, BLKBY, [LOGIN], [DBNAME]
+FROM #WHO2
+WHERE SPID IN (SELECT ISNULL(REPLACE(REPLACE(CAST(BLKBY AS VARCHAR),' ',''),'.',''),'') [SPID] FROM #WHO2)
+OR ISNULL(REPLACE(REPLACE(CAST(BLKBY AS VARCHAR),' ',''),'.',''),'') <> ''
+ORDER BY BLKBY, SPID
+
+BEGIN TRY 
+DROP TABLE #INPUTBUFFER
+END TRY
+BEGIN CATCH
+END CATCH
+
+CREATE TABLE #INPUTBUFFER (
+EventType VARCHAR(MAX)
+, Parameters VARCHAR(MAX)
+, EventInfo VARCHAR(MAX)
+)
+
+SELECT @POS = 1, @CNTR = MAX([ID]), @BODY = '', @LASTSPID = '', @LASTBLKBY = ''
+, @LOGIN = ''
+, @DBNAME = ''
+FROM @WHO2MAIL
+---Put email where you required the DB blocking alering E-mail
+SELECT @TO = ISNULL(@TO,'SOMEONE@SOMEWHERE.COM')
+
+WHILE @POS <= @CNTR
+  BEGIN
+SELECT @SPID = CAST(SPID AS VARCHAR)
+, @BLKBY = CAST(BLKBY AS VARCHAR)
+, @LOGIN = CAST(ISNULL([LOGIN],'') AS VARCHAR)
+, @DBNAME = CAST(ISNULL([DBNAME],'') AS VARCHAR)
+FROM @WHO2MAIL
+WHERE ID = @POS
+
+TRUNCATE TABLE #INPUTBUFFER
+
+--IF @POS = 1 
+-- BEGIN
+----Code to capture first person and include in the email can be added here. 
+ --END
+
+SELECT @SQL = 'DBCC INPUTBUFFER(' + @SPID + ')'
+
+PRINT @SQL
+
+INSERT INTO #INPUTBUFFER(EventType, Parameters, EventInfo)
+EXEC(@SQL)
+
+SELECT @EventInfo = ISNULL(EventInfo,'')
+FROM #INPUTBUFFER
+
+if @BODY is not null or @BODY<>''
+begin
+
+IF @LASTBLKBY = @BLKBY AND @LASTSPID = @SPID
+ BEGIN
+SELECT @BODY = @BODY
+ END
+ELSE
+ BEGIN 
+SELECT @BODY = @BODY + '<BR><b>' 
++ @SPID + ' IS BEING BLOCKED BY ' + @BLKBY 
++ ' Login: </B style="color:red">' + @LOGIN
++ ' <B style="color:red">DBName: </B>' + @DBNAME
++ '<BR> <B style="color:red">SQL_QUERY:</b> ' + @EventInfo + '<BR>'
+, @LASTBLKBY = @BLKBY 
+, @LASTSPID = @SPID
+ END
+
+ END
+
+SELECT @POS = @POS + 1
+ END
+  EXEC DBO.DBA_spSendMail-- <--Whatever proc you use to send email... This proc is included below.
+@TO = @TO
+, @SUBJECT = 'DBA_BLOCKED SPIDS ALERT!!!'
+, @BODY = @Body
+ END
+
+
+
+BEGIN TRY
+DROP TABLE #WHO2
+END TRY
+BEGIN CATCH
+END CATCH
+
+BEGIN TRY 
+DROP TABLE #INPUTBUFFER
+END TRY
+BEGIN CATCH
+END CATCH
+
+
+
+*************************************
+
+--------------------------------------------------------------------------------------------------------
+--Proc for sending email using DBMail... You can use yours if you have one instead.
+--------------------------------------------------------------------------------------------------------
+
+/**************************************************************************************
+NAME:        SUBHASH CHANDRA
+DATE:        17-03-2018
+PURPOSE:    SEND EMAIL. 
+
+MODIFICATIONS:
+    JAW - 17-03-2018 - INITIAL CREATION
+
+NOTES:
+    [ @file_attachments = ] 'file_attachments'
+Is a semicolon-delimited list of file names to attach to the e-mail message. Files in the list must be specified as absolute paths. 
+
+TESTING:
+EXEC DBO.DBA_spSendMail
+@TO = 'SOMEONE@SOMEWHERE.COM'
+, @SUBJECT = 'TESTING'
+, @BODY = 'This is a test'
+--, @CC = 'SOMEONE@SOMEWHERE.COM'
+--, @BCC = 'SOMEONE@SOMEWHERE.COM'
+, @file_attachments = 'C:\SOMEFILE.log'
+**************************************************************************************/
+CREATE PROCEDURE [dbo].[DBA_spSendMail]
+@TO VARCHAR(8000)
+, @SUBJECT VARCHAR(255)
+, @BODY NVARCHAR(max)
+, @CC VARCHAR(8000) = NULL
+, @BCC VARCHAR(8000) = NULL
+, @profile_name VARCHAR(255) = 'PROFILE_NAME'
+, @file_attachments NVARCHAR(max) = NULL
+
+AS
+
+SET NOCOUNT ON
+
+-----------------------------------------------------------------------------------------------------
+--SELECT @BODY = @BODY + '<br><br>*** SYSTEM ACCOUNT: PLEASE DO NOT REPLY TO THIS MESSAGE ***'
+SELECT @BODY = @BODY + '<br><br>*** SYSTEM ACCOUNT (' + CAST(@@SERVERNAME AS VARCHAR) + '): PLEASE DO NOT REPLY TO THIS MESSAGE THANKS DBA TEAM ***'
+-----------------------------------------------------------------------------------------------------
+
+
+--Create Job
+
+----------------------------------------------------------------------------------
+-- Job for running this proc every 2 minutes.
+----------------------------------------------------------------------------------
+GO
+
+USE [msdb]
+GO
+/****** Object: Job [[MAINT]] Blocked Process ALERT] Script Date: 03/17/2018 10:22:21 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object: JobCategory [[Uncategorized (Local)]]] Script Date: 03/17/2018 10:22:21 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode = msdb.dbo.sp_add_job @job_name=N'Blocked Process Alerts', 
+        @enabled=0, --ENABLE THE JOB ONCE YOU GOT EVERYTHING IN PLACE... DEFAULT IS DISABLED.
+        @notify_level_eventlog=0, 
+        @notify_level_email=2, 
+        @notify_level_netsend=0, 
+        @notify_level_page=0, 
+        @delete_level=0, 
+        @description=N'No description available.', 
+        @category_name=N'[Uncategorized (Local)]', 
+        @owner_login_name=N'sa', 
+        @notify_email_operator_name=N'OperatorName', @job_id = @jobId OUTPUT -- <--Your operator name here... 
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object: Step [DUMMY START] Script Date: 03/17/2018 10:22:21 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'START', 
+        @step_id=1, 
+        @cmdexec_success_code=0, 
+        @on_success_action=3, 
+        @on_success_step_id=0, 
+        @on_fail_action=3, 
+        @on_fail_step_id=0, 
+        @retry_attempts=0, 
+        @retry_interval=0, 
+        @os_run_priority=0, @subsystem=N'TSQL', 
+        @command=N'--DO NOTHING', 
+        @database_name=N'master', 
+        @flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object: Step [EXEC PROC] Script Date: 03/17/2018 10:22:21 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'EXEC PROC', 
+        @step_id=2, 
+        @cmdexec_success_code=0, 
+        @on_success_action=3, 
+        @on_success_step_id=0, 
+        @on_fail_action=2, 
+        @on_fail_step_id=0, 
+        @retry_attempts=1, 
+        @retry_interval=1, 
+        @os_run_priority=0, @subsystem=N'TSQL', 
+        @command=N'EXEC DBO.DBA_spWho2CaptureAlert_Blocking', 
+        @database_name=N'master', --Your DB Name where this runs here... 
+        @flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object: Step [DUMMY CLOSE] Script Date: 03/17/2018 10:22:21 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'STOP', 
+        @step_id=3, 
+        @cmdexec_success_code=0, 
+        @on_success_action=1, 
+        @on_success_step_id=0, 
+        @on_fail_action=1, 
+        @on_fail_step_id=0, 
+        @retry_attempts=0, 
+        @retry_interval=0, 
+        @os_run_priority=0, @subsystem=N'TSQL', 
+        @command=N'--DO NADA', 
+        @database_name=N'master', 
+        @flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'EVERY 2 MIN FROM 7 TO 7 - 1', 
+        @enabled=1, 
+        @freq_type=8, 
+        @freq_interval=62, 
+        @freq_subday_type=4, 
+        @freq_subday_interval=2, 
+        @freq_relative_interval=0, 
+        @freq_recurrence_factor=1, 
+        @active_start_date=20180320, 
+        @active_end_date=99991231, 
+        @active_start_time=70000, 
+        @active_end_time=190000
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+---------------------------------------------------------------------------------------------------
