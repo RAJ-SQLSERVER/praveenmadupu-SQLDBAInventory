@@ -1,0 +1,659 @@
+--Copy Backup Files to Remote Shared Location and Delete them periodically
+--https://www.sqlservercentral.com/scripts/copy-backup-files-to-remote-shared-location-and-delete-them-periodically
+--Copy the script in SSMS
+--Change the PAth to the variable : @chkdirectory
+--Run it.
+===========================================================================
+USE [DB_Maint]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF OBJECT_ID(N'[dbo].[usp_move_delete_bkp]') IS NOT NULL
+BEGIN
+    DROP PROCEDURE [dbo].[usp_move_delete_bkp]
+END
+GO
+
+Create Proc usp_move_delete_bkp (@daysold INT = 3)
+as
+BEGIN
+Begin try
+
+SET NOCOUNT ON
+Declare @len INT, @i INT, @Left varchar(max), @right varchar(max), @SERVERNAME sysname,@finalServer sysname
+
+declare @rc int, @dir nvarchar(4000)
+
+
+DECLARE @cmd1 sysname, @cmd2 sysname, @cmd sysname;
+Declare @extPAth varchar(max)
+
+declare @chkdirectory as nvarchar(4000),@folder_exists as int, @chkdirectory1 as nvarchar(4000);
+set @chkdirectory = '\\shared_path\folder'; -- Define the Remote Location.
+
+SET @chkdirectory1 = (Select @chkdirectory);
+
+Declare @deletedate nvarchar(19) ,@strDir varchar(250)
+declare @cmd11 nvarchar(2000)
+declare @mainBackupDir varchar(2000),
+@result1 nvarchar(max);
+
+--set @daysold = 3
+
+SET @SERVERNAME = (SELECT @@servername);
+
+--select @backup_path AS [TLOG Backup PATH]
+--PRINT @SERVERNAME
+
+IF @SERVERNAME like '%\%'
+
+BEGIN
+SET @Left= (select Left(@SERVERNAME, charindex('\', @SERVERNAME) - 1))
+--SELECT @Left AS [DEFAULT SERVER NAME]
+SET @len = (SELECT LEN(@SERVERNAME))
+
+--SELECT @LEN
+SET @right = (SELECT SUBSTRING(@SERVERNAME,Charindex ('\', @SERVERNAME)+1,@len))
+--SELECT @right AS [SQL INSTANCE NAME]
+
+SET @finalServer = @Left + '_'+ @right;
+--SELECT @finalServer
+END
+
+ELSE
+BEGIN
+
+    SET @left  = @SERVERNAME
+	--SELECT @Left AS [DEFAULT SERVER NAME]
+
+ --   SELECT @right = 'default'
+--SELECT @right AS [SQL INSTANCE NAME]
+
+
+	SET @finalServer = @Left
+	--SELECT @finalServer
+END
+    
+    set @chkdirectory = @chkdirectory + @finalServer +'\'
+ 
+   --Print @chkdirectory
+   --Print @finalServer
+/*
+-- 1 - Variable declaration
+--DECLARE @DBName sysname
+--DECLARE @DataPath nvarchar(500)
+--DECLARE @LogPath nvarchar(500)
+DECLARE @DirTree TABLE (subdirectory nvarchar(255), depth INT)
+
+ -- 3 - @DataPath values
+INSERT INTO @DirTree(subdirectory, depth)
+EXEC master.sys.xp_dirtree @chkdirectory
+
+-- 4 - Create the @DataPath directory
+IF NOT EXISTS (SELECT 1 FROM @DirTree WHERE subdirectory = @chkdirectory)
+EXEC master.dbo.xp_create_subdir @chkdirectory
+
+-- 5 - Remove all records from @DirTree
+DELETE FROM @DirTree
+
+---- 6 - @LogPath values
+--INSERT INTO @DirTree(subdirectory, depth)
+--EXEC master.sys.xp_dirtree @LogPath
+
+-- 7 - Create the @LogPath directory
+IF NOT EXISTS (SELECT 1 FROM @DirTree WHERE subdirectory = @chkdirectory)
+EXEC master.dbo.xp_create_subdir @LogPath
+
+*/
+
+----------------
+
+declare @finalserver3 varchar(4000);
+create table #tmp (directory_name varchar(4000))
+
+
+SET @finalserver3 = '''"DIR ' + @chkdirectory1 + ' /B"''';
+--select @finalserver3
+
+--SELECT @finalServer
+
+DECLARE @ExecCmd varchar(100)
+--SELECT @ExecCmd = 'EXEC master.dbo.xp_cmdshell ' + char(50) + 'mkdir D:\'+ CONVERT(varchar(8), getdate(), 112) + '\' + char(50)
+SET @ExecCmd = 'EXEC master.dbo.xp_cmdshell ' +   @finalserver3
+--SELECT @ExecCmd
+
+
+insert into #tmp
+EXEC(@ExecCmd)
+
+select * from #tmp
+where directory_name IS NOT NULL;
+
+	IF EXISTS (select directory_name from #tmp where directory_name = @finalServer)
+	Print 'Directory ' +  quotename(@finalServer) + ' already Exists in shared location: ' + quotename(@chkdirectory1);
+
+   ELSE
+
+   BEGIN
+   
+------------------
+    declare @file_results table
+    (file_exists int,
+    file_is_a_directory int,
+    parent_directory_exists int
+    )
+    
+	declare @parent_directory_exists INT;
+    insert into @file_results
+    (file_exists, file_is_a_directory, parent_directory_exists)
+    exec master.dbo.xp_fileexist @chkdirectory
+     
+    select @folder_exists = file_is_a_directory
+    from @file_results
+
+	select @parent_directory_exists = parent_directory_exists
+    from @file_results
+    
+	select * from @file_results
+
+    --script to create directory        
+    if (@folder_exists = 0) AND (@parent_directory_exists = 0)
+     begin
+        print 'Directory does not exist, creating new one:->'
+        EXECUTE master.dbo.xp_create_subdir @chkdirectory
+        print 'Directory ' + quotename(@chkdirectory) +  ' is created in sharepath: ' + quotename(@chkdirectory)
+     end       
+    else if (@folder_exists = 0) AND (@parent_directory_exists = 1)
+    -- print 'Directory already exists Or May be created it as File in the path.'
+   	 RAISERROR ('Directory already exists Or May be created it as File in the path.', -- Message text.
+               16, -- Severity.
+               1 -- State.
+               );
+
+	--else if (@folder_exists = 1) AND (@parent_directory_exists = 0)
+ --   print ''
+
+END
+
+--SET NOCOUNT OFF
+
+-- Check location of host backup folder :
+
+--SET NOCOUNT ON
+
+exec @rc = master.dbo.xp_instance_regread
+N'HKEY_LOCAL_MACHINE',N'Software\Microsoft\MSSQLServer\MSSQLServer',N'BackupDirectory', @dir output
+--Select @dir AS [Backup Path] -- Gives the BAckup Path.
+
+
+SET NOCOUNT OFF
+
+------------------------------------------------------------------------------------
+-- Check All the sub-folders in the source location.
+SET NOCOUNT ON
+DECLARE
+@DBName sysname,
+@ServerName1 sysname,
+@BaseBackupPath VARCHAR(100),
+@FullPath VARCHAR(200)
+
+DECLARE @DirTree TABLE (subdirectory nvarchar(255), depth INT)
+
+-- 2 - Initialize variables
+SET @BaseBackupPath = @dir
+
+--Print @BaseBackupPath
+
+-- 3 - @BaseBackupPath values
+INSERT INTO @DirTree(subdirectory, depth)
+
+EXEC master.sys.xp_dirtree @BaseBackupPath
+
+-- 4 - Create the backup directory using a concatenation of Base, Server and Database names
+IF NOT EXISTS (SELECT 1 FROM @DirTree WHERE subdirectory = @DBName)
+AND NOT EXISTS (SELECT 1 FROM @DirTree WHERE subdirectory = @ServerName1)
+BEGIN
+SELECT @FullPath = @BaseBackupPath 
+--Print @FullPath
+EXEC master.dbo.xp_create_subdir @FullPath
+END
+
+
+select * from @DirTree
+
+SET NOCOUNT OFF
+------------------------------------------------------------------------------------
+
+-- Check All the sub-folders in the Shared location.
+--SET NOCOUNT ON
+
+--DECLARE
+--@DBName2 sysname,
+--@ServerName2 sysname,
+--@BaseBackupPath2 VARCHAR(100),
+--@FullPath2 VARCHAR(200)
+
+--DECLARE @DirTree1 TABLE (subdirectory nvarchar(255), depth INT)
+
+-- 2 - Initialize variables
+--SET @BaseBackupPath2 = @chkdirectory
+
+--Print @BaseBackupPath2
+
+---- 3 - @BaseBackupPath values
+--INSERT INTO @DirTree1(subdirectory, depth)
+--EXEC master.sys.xp_dirtree '\\shared_path\Folder'
+
+--select * from @DirTree1
+--set nocount on
+	
+--		declare @command varchar(1000)
+--		set @command = 'mkdir ' + @full_path
+
+--		exec master..xp_cmdshell @command , no_output	
+
+--		set nocount off
+
+---- 4 - Create the backup directory using a concatenation of Base, Server and Database names
+--IF NOT EXISTS (SELECT 1 FROM @DirTree WHERE subdirectory = @DBName2)
+--OR NOT EXISTS (SELECT 1 FROM @DirTree WHERE subdirectory = @ServerName2)
+--BEGIN
+--SELECT @FullPath2 = @chkdirectory 
+--Print @FullPath2
+--EXEC master.dbo.xp_create_subdir @FullPath2
+--END
+
+--select * from @DirTree1
+
+--SET NOCOUNT OFF
+
+----------------------------------------------------------------------------------
+
+/*
+
+-- Check the backup files in the default backup path. (NO FOLDER LEVEL CHECK)
+----------------------------------------------------------------------------------------------------------
+
+--EXEC GetDirDetails @pifullPath = 'C:\Program Files\Microsoft SQL Server\MSSQL11.INST4\MSSQL\Backup'
+
+/**************************************************************************************************
+ Purpose:
+ Replacement code for the sp_GetFileDetails proc that was available in SQL Server 2000 
+ which is no longer available in SQL Server 2005 except this gets all the file details 
+ for all the files in the directory provided.
+
+ Notes:
+ 1. If the directory does not exist or there are no files in the directory, an empty
+    result set will be returned.
+ 2. If the trailing backslash on the path is missing, it will be added automatically.
+ 3. No error checking is done.  Either a valid result set is returned or an empty
+    result set is returned (much like a function operates).
+
+
+**************************************************************************************************/
+--===== Declare the I/O parameters
+  Declare @piFullPath VARCHAR(128)
+
+  SET @piFullPath = @Dir; -- Getting the backup path location from previous script.
+--===== Suppress the auto-display of rowcounts so as not to interfere with the returned
+     -- result set
+    SET NOCOUNT ON
+
+--=================================================================================================
+--      Local variables
+--=================================================================================================
+--===== These are processing control and reporting variables
+DECLARE @Counter          INT          --General purpose counter
+DECLARE @CurrentName      VARCHAR(256) --Name of file currently being worked
+DECLARE @DirTreeCount     INT          --Remembers number of rows for xp_DirTree
+DECLARE @IsFile           BIT          --1 if Name is a file, 0 if not
+
+--===== These are object "handle" variables
+DECLARE @ObjFile          INT          --File object
+DECLARE @ObjFileSystem    INT          --File System Object  
+
+--===== These variable names match the sp_OAGetProperty options
+     -- Made names match so they're less confusing
+DECLARE @Attributes       INT          --Read only, Hidden, Archived, etc, as a bit map
+DECLARE @DateCreated      DATETIME     --Date file was created
+DECLARE @DateLastAccessed DATETIME     --Date file was last read (accessed)
+DECLARE @DateLastModified DATETIME     --Date file was last written to
+DECLARE @Name             VARCHAR(128) --File Name and Extension
+DECLARE @Path             VARCHAR(128) --Full path including file name
+DECLARE @ShortName        VARCHAR(12)  --8.3 file name
+DECLARE @ShortPath        VARCHAR(100) --8.3 full path including file name
+DECLARE @Size             INT          --File size in bytes
+DECLARE @Type             VARCHAR(100) --Long Windows file type (eg.'Text Document',etc)
+
+--=================================================================================================
+--      Create temporary working tables
+--=================================================================================================
+--===== Create a place to store all file names derived from xp_DirTree
+     IF OBJECT_ID('TempDB..#DirTree','U') IS NOT NULL
+        DROP TABLE #DirTree
+
+ CREATE TABLE #DirTree
+(
+        RowNum INT IDENTITY(1,1),
+        Name   VARCHAR(256) PRIMARY KEY CLUSTERED, 
+        Depth  BIT, 
+        IsFile BIT
+)
+
+--===== Create a place to store the file details so we can return all the file details
+     -- as a single result set
+     IF OBJECT_ID('TempDB..#FileDetails','U') IS NOT NULL
+        DROP TABLE #FileDetails
+
+ CREATE TABLE #FileDetails
+(
+        RowNum           INT IDENTITY(1,1) PRIMARY KEY CLUSTERED,
+        Name             VARCHAR(128), --File Name and Extension
+        Path             VARCHAR(128), --Full path including file name
+        ShortName        VARCHAR(12),  --8.3 file name
+        ShortPath        VARCHAR(100), --8.3 full path including file name
+        DateCreated      DATETIME,     --Date file was created
+        DateLastAccessed DATETIME,     --Date file was last read
+        DateLastModified DATETIME,     --Date file was last written to
+        Attributes       INT,          --Read only, Compressed, Archived
+        ArchiveBit       AS CASE WHEN Attributes&  32=32   THEN 1 ELSE 0 END,
+        CompressedBit    AS CASE WHEN Attributes&2048=2048 THEN 1 ELSE 0 END,
+        ReadOnlyBit      AS CASE WHEN Attributes&   1=1    THEN 1 ELSE 0 END,
+        Size             INT,          --File size in bytes
+        Type             VARCHAR(100)  --Long Windows file type (eg.'Text Document',etc)
+)
+
+--=================================================================================================
+--      Make sure the full path name provided ends with a backslash
+--=================================================================================================
+ SELECT @piFullPath = @piFullPath+'\'
+  WHERE RIGHT(@piFullPath,1)<>'\'
+
+--=================================================================================================
+--      Get all the file names for the directory (includes directory names as IsFile = 0)
+--=================================================================================================
+--===== Get the file names for the desired path
+     -- Note that xp_DirTree is available in SQL Server 2000, 2005, and 2008.
+ INSERT INTO #DirTree (Name, Depth, IsFile)
+   EXEC Master.dbo.xp_DirTree @piFullPath,1,1 -- Current diretory only, list file names
+
+     -- Remember the row count
+    SET @DirTreeCount = @@ROWCOUNT
+
+
+--===== Update the file names with the path for ease of processing later on
+ UPDATE #DirTree
+    SET Name = @piFullPath + Name
+
+--=================================================================================================
+--      Get the properties for each file.  This is one of the few places that a WHILE
+--      loop is required in T-SQL.
+--=================================================================================================
+--===== Create a file system object and remember the "handle"
+   EXEC dbo.sp_OACreate 'Scripting.FileSystemObject', @ObjFileSystem OUT
+
+--===== Step through the file names and get the properties for each file.
+    SET @Counter = 1
+  WHILE @Counter <= @DirTreeCount
+  BEGIN
+        --===== Get the current name and see if it's a file
+         SELECT @CurrentName = Name,
+                @IsFile = IsFile
+           FROM #DirTree 
+          WHERE RowNum = @Counter
+        
+        --===== If it's a file, get the details for it
+             IF @IsFile = 1 AND @CurrentName LIKE '%%'
+          BEGIN
+                --===== Create an object for the path/file and remember the "handle"
+                   EXEC dbo.sp_OAMethod @ObjFileSystem,'GetFile', @ObjFile OUT, @CurrentName
+                
+                --===== Get the all the required attributes for the file itself
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'Path',             @Path             OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'ShortPath',        @ShortPath        OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'Name',             @Name             OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'ShortName',        @ShortName        OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'DateCreated',      @DateCreated      OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'DateLastAccessed', @DateLastAccessed OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'DateLastModified', @DateLastModified OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'Attributes',       @Attributes       OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'Size',             @Size             OUT
+                   EXEC dbo.sp_OAGetProperty @ObjFile, 'Type',             @Type             OUT
+        
+                --===== Insert the file details into the return table        
+                 INSERT INTO #FileDetails
+                        (Path, ShortPath, Name, ShortName, DateCreated, 
+                         DateLastAccessed, DateLastModified, Attributes, Size, Type)
+                 SELECT @Path,@ShortPath,@Name,@ShortName,@DateCreated, 
+                        @DateLastAccessed,@DateLastModified,@Attributes,@Size,@Type
+            END
+        
+        --===== Increment the loop counter to get the next file or quit
+         SELECT @Counter = @Counter + 1
+    END
+
+--===== House keeping, destroy and drop the file objects to keep memory leaks from happening
+   EXEC sp_OADestroy @ObjFileSystem
+   EXEC sp_OADestroy @ObjFile
+
+--===== Return the details for all the files as a single result set.
+     -- This is one of the few places in T-SQL where SELECT * is ok.
+ SELECT * FROM #FileDetails
+
+SET NOCOUNT OFF
+*/
+
+--PRINT @dir
+--PRINT @chkdirectory
+
+-- Copy files between servers
+--EXECUTE xp_cmdshell 'copy G:\Backups\MSSQLSERVER\*.bak \\shared_path\folder\'
+--EXECUTE xp_cmdshell 'type G:\Backups\MSSQLSERVER\var_out.txt'
+
+SET @extPAth = @chkdirectory
+SET @cmd = '"copy ' + @dir + '\*.BAK' + ' ' + @extPAth +'"' + ' > ' +@dir +'\var_out.txt';
+
+--SELECT @cmd
+--EXECUTE master..xp_cmdshell @cmd, 'no_output'
+
+DECLARE @result int;
+EXEC @result = xp_cmdshell @cmd, 'no_output' 
+IF (@result = 0)
+   PRINT 'COPY Files between servers -> Success'
+ELSE
+   PRINT 'COPY Files between servers ->Failure. Debug Properly. It could be due to the reason that directory may be available as a FILE in shared path. Error Code:error 183';
+
+
+-- list out all the backup files located in the location.
+/*
+declare
+    @Ext NVARCHAR(4)
+    ,@DelDt VARCHAR(19)
+    ,@BackupPath VARCHAR(800)
+
+select
+    @Ext = 'bak'
+    ,@BackupPath = @chkdirectory
+
+-- Delete backup files older than 2 days.
+SELECT
+    @DelDt = CONVERT(VARCHAR(19), DATEADD(hh, -48, GETDATE()), 126)
+
+EXEC master.dbo.xp_delete_file 0, @BackupPath, @Ext, @DelDt
+*/
+
+SET NOCOUNT ON
+
+-- Check and Delete Temp table.
+ IF OBJECT_ID('TempDB..#Dir_list','U') IS NOT NULL
+ DROP TABLE #Dir_list
+
+ 	IF EXISTS (select (directory_name) from #tmp where directory_name = @finalServer)
+--Print 'Directory ' +  quotename(@finalServer) + ' already Exists in shared location: ' + quotename(@chkdirectory1);
+
+BEGIN
+set @mainBackupDir = @chkdirectory -- location from where I need to delete.
+create table #Dir_list (strDir nvarchar(max) )
+set @cmd11 = 'dir ' + @mainBackupDir + ' /b /OD'
+
+--Print @cmd11
+
+insert into #Dir_list
+exec xp_cmdshell @cmd11
+
+-- Check the results from table.
+--select * from #Dir_list
+--where strDir is not null
+
+
+--set @deletedate = convert(varchar,getdate()-@daysold,101) + ' ' + convert(varchar,getdate()-@daysold,108)
+
+SELECT
+    @deletedate = CONVERT(VARCHAR(19), DATEADD(hh, -48, GETDATE()), 126)
+
+
+-- Close all the opened Cursors.
+
+IF (SELECT Cursor_status('global', 'DeleteBackup')) >= -1 
+
+       BEGIN 
+	      IF (SELECT Cursor_status('global', 'DeleteBackup')) > -1 
+		      BEGIN 
+			         CLOSE DeleteBackup 
+					 END 
+					 DEALLOCATE DeleteBackup 
+             END
+
+DECLARE DeleteBackup CURSOR FOR 
+select strDir from #Dir_list
+where strDir is not null
+
+OPEN DeleteBackup
+FETCH NEXT FROM DeleteBackup 
+INTO @strDir
+
+WHILE @@FETCH_STATUS = 0
+BEGIN
+set @cmd11 = @mainBackupDir + '\' + @strDir
+--print 'Deleting files from ' + @cmd11 + ' , that are older than ' + @deletedate
+
+/* Full backup */
+--print @cmd11
+
+
+set @cmd11 = 'EXECUTE master.dbo.xp_delete_file 0,N''' + @cmd11 +''' ,N''bak'',N''' + @deletedate + ''''
+
+--exec sp_executesql @cmd11
+
+EXEC sp_executesql @cmd11
+
+--IF (@result1 = 0)
+--   PRINT 'Deletion Success'
+--ELSE
+--   PRINT 'Deletion Fail';
+--END
+--EXEC sp_executesql @result1 = @cmd11
+
+
+--SET @result1 = @@rowcount;
+--PRINT @result1
+
+/* Transaction log */
+--set @cmd11 = @mainBackupDir + '\' + @strDir
+--set @cmd11 = 'EXECUTE master.dbo.xp_delete_file 0,N''' + @cmd11 +''' ,N''trn'',N''' + @deletedate + ''''
+--print @cmd11
+--exec sp_executesql @cmd11
+
+FETCH NEXT FROM DeleteBackup 
+INTO @strDir
+
+--PRINT 'Number of BAckup Files deleted from UNC: ' + convert(varchar(10), @result1)
+
+END
+CLOSE DeleteBackup
+DEALLOCATE DeleteBackup
+
+--Cleanup
+drop table #tmp
+END
+
+ELSE
+
+BEGIN
+ Print 'Directory Does not Exist. Hence Can not Run the Delete Backup File Step to Clean up Files. Ensure that the Directory Exists in Shared Path';
+ Return (1)
+
+END
+--select * from #Dir_list
+
+/* Query to delete folder from Central location..*/
+--- RUN It carefully ---------------
+
+/*
+declare	@cmd varchar(100),
+@Path varchar(200) ,
+@FileName varchar(255)
+
+--select	@Path = '\\shared_path\folder' 
+
+declare	@objFSO int
+declare @i int
+declare	@File varchar(1000)
+
+select @cmd = 'dir /B ' + @Path
+create table #dir(files varchar(1000))
+
+insert #dir exec master..xp_cmdshell @cmd
+
+select * from #dir
+
+while exists (select files from #dir where files is not null)
+begin
+select @filename = max(files) from #dir
+--Print @filename 
+select @File = @Path + @fileName
+exec sp_OACreate 'Scripting.FileSystemObject', @objFSO out
+exec sp_OAMethod @objFSO,'DeleteFile', null, @File
+exec sp_OADestroy @objFSO 
+delete from #dir where files = @filename
+end
+
+drop table #dir
+*/
+
+
+
+SET NOCOUNT OFF
+
+END TRY
+
+BEGIN catch 
+
+DECLARE @ErrorNumber    INT; 
+DECLARE @ErrorSeverity  INT; 
+DECLARE @ErrorState     INT; 
+DECLARE @ErrorLine      INT; 
+DECLARE @ErrorProcedure NVARCHAR(4000); 
+DECLARE @ErrorMessage   NVARCHAR(4000); 
+
+SELECT @ErrorNumber = Error_number(), 
+       @ErrorSeverity = Error_severity(), 
+	   @ErrorState = Error_state(), 
+	   @ErrorLine = Error_line(), 
+	   @ErrorProcedure = Error_procedure(); 
+	       
+SELECT @ErrorMessage = N'Error %d, Level %d, State %d, Procedure %s, Line %d, ' + 'Message: ' + Error_message();
+SELECT @ErrorMessage AS [Error_Message]; 
+SELECT @ErrorProcedure AS [Error_Procedure]; 
+
+PRINT 'Error ' + CONVERT(VARCHAR(50), Error_number()) + ', Severity ' + CONVERT(VARCHAR(5), Error_severity()) + ', State ' + CONVERT(VARCHAR(5), Error_state()) + ', Procedure ' + Isnull(Error_procedure(), '-') + ', Line ' + CONVERT(VARCHAR(5), Error_line()); 
+--PRINT Error_message(); 
+SELECT Error_message(); 
+END catch 
+SET NOCOUNT OFF
+END
