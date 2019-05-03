@@ -1,0 +1,47 @@
+--Execute All .SQL Script easily
+--Copy the script to SQL SSMS
+--Change the PAth from where you want to execute script.
+--Run it.
+
+-- Script to Build Procedures, Tables, etc in mi
+CREATE TABLE ##SQLFiles ( SQLFileName VARCHAR(2000))
+GO
+
+INSERT INTO ##SQLFiles
+EXECUTE master.dbo.xp_cmdshell 'dir /b "\\ServerUNC\Folder1\DBA_TSQL_Scripts\Procedure\*.sql"'
+GO
+
+select * from ##SQLFiles
+--DROP TABLE ##SQLFiles
+
+DECLARE cFiles CURSOR LOCAL FOR
+    SELECT DISTINCT [SQLFileName]
+    FROM ##SQLFiles
+    WHERE [SQLFileName] IS NOT NULL AND
+          [SQLFileName] != 'NULL'
+    ORDER BY [SQLFileName]
+
+DECLARE @vFileName            VARCHAR(200)
+DECLARE @vSQLStmt             VARCHAR(4000)
+DECLARE @OutPutFolder         VARCHAR(4000) = '\\ServerUNC\Folder1\DBA_TSQL_Scripts\output';
+DECLARE @inputFolder          VARCHAR(4000) = '\\ServerUNC\Folder1\DBA_TSQL_Scripts\Table\';
+
+OPEN cFiles
+FETCH NEXT FROM cFiles INTO @vFileName
+WHILE @@FETCH_STATUS = 0
+BEGIN
+
+    SET @vSQLStmt = 'master.dbo.xp_cmdshell ''osql -S SERVERNAME -E -d DATABASE -i "' + @inputFolder + '\'+ @vFileName + '" -o "' + @OutPutFolder +'\fOLDER\' + @vFileName +'_output.txt"'''
+    EXECUTE (@vSQLStmt)
+
+	Print @vSQLStmt
+
+    FETCH NEXT FROM cFiles INTO @vFileName
+END
+
+CLOSE cFiles
+DEALLOCATE cFiles
+GO
+
+DROP TABLE ##SQLFiles
+GO
