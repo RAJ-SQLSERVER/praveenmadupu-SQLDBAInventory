@@ -1,0 +1,111 @@
+--DBCC CHECKDB Email Automation
+--https://www.mssqltips.com/sqlservertip/5700/generate-html-formatted-email-of-sql-server-database-consistency-check-errors/
+
+USE msdb
+GO
+
+CREATE PROCEDURE Dbasp_checkdb
+AS
+BEGIN
+   DECLARE @DBName varchar(250)
+   DECLARE @DBCount int
+   DECLARE @I int =0
+   DECLARE @sql NVARCHAR(4000)
+   
+   IF Object_id('tempdb..#DBCC_OUTPUT') IS NOT NULL
+        DROP TABLE #dbcc_output
+
+   CREATE TABLE #dbcc_output
+      (
+       [error]       [INT] NULL,
+       [level]       [INT] NULL,
+       [state]       [INT] NULL,
+       [messagetext] [NVARCHAR](max) NULL,
+       [repairlevel] [NVARCHAR](max) NULL,
+       [status]      [INT] NULL,
+       [dbid]        [INT] NULL,
+       [dbfragid]    [INT] NULL,
+       [id]          [BIGINT] NULL,
+       [indid]       [BIGINT] NULL,
+       [partitionid] [BIGINT] NULL,
+       [allocunitid] [BIGINT] NULL,
+       [file]        [INT] NULL,
+       [page]        [INT] NULL,
+       [slot]        [INT] NULL,
+       [reffile]     [INT] NULL,
+       [refpage]     [INT] NULL,
+       [refslot]     [INT] NULL,
+       [allocation]  [INT] NULL,
+       [riddbid]     [INT] NULL,
+       [ridpruid]    [INT] NULL,
+       [refdbid]     [INT] NULL,
+       [refpruid]    [INT] NULL
+       )
+
+   CREATE TABLE #Databases (Name varchar(250))
+
+   INSERT INTO #Databases 
+   SELECT NAME
+   FROM   sys.databases db
+   WHERE  database_id > 9
+     AND db.state_desc = 'ONLINE'
+     AND source_database_id IS NULL
+     AND is_read_only = 0
+   
+   SET @DBCount=(select count (1) from #Databases)
+   
+   WHILE (@DBCount>@I)
+   BEGIN
+      SET @DBName = (SELECT TOP 1 name FROM #Databases)
+      SET @sql = 'DBCC CHECKDB(' + @dbName  + ') WITH TABLERESULTS, ALL_ERRORMSGS,NO_INFOMSGS'
+      INSERT INTO #dbcc_output EXEC (@sql)
+      DELETE FROM #Databases WHERE name=@DBName
+      SET @I=@i+1
+   END    
+
+   DECLARE @subject NVARCHAR(max)
+   DECLARE @tableHTML NVARCHAR(max)
+   DECLARE @ErrorCount_120 INT
+
+   SET @subject = 'Database Consistancy Check report for Server : ' + @@servername
+
+   SELECT @ErrorCount_120 = Count(*) FROM #dbcc_output
+
+   IF ( @ErrorCount_120 > 0 )
+      BEGIN
+         SET @tableHTML =
+            '     <html>     <Body>     <style type="text/css">      table {font-size:9.0pt;font-family:verdana;text-align:left;}      tr {text-align:left;}      
+            h3 {            display: block;        font-size: 15.0pt;        font-weight: bold;        font-family: verdana;        text-align:left;       }    
+            </style>     <H3>Summery of Database Consistancy Check on Server '
+            + @@servername + '</H3>' + N'<table border="1">'
+            + N'<tr>     <th>MessageText</th>     <th>Corrupt Database</th>     <th>RepairLevel</th>     </tr>'
+            + Cast((SELECT Isnull(messagetext, '') AS 'TD', '',
+            Isnull(
+            Db_name(dbid), '') AS 'TD', '', Isnull(repairlevel,
+            '')
+            AS
+            'TD'
+            , '' FROM #dbcc_output FOR xml path
+            (
+            'tr'
+            ),
+            root) AS NVARCHAR(max))
+            + N'</table>      </html>     </Body>'
+      END
+   ELSE
+      BEGIN
+         SET @tableHTML = '     <html>     <Body>     <style type="text/css">      table {font-size:9.0pt;font-family:verdana;text-align:left;}     
+         tr {text-align:left;}      h3 {            display: block;        font-size: 15.0pt;        font-weight: bold;        font-family: verdana;        text-align:left;       }    
+          </style>     <H3>No Consistency Errors Found on Server '
+         + @@servername + '</H3>'
+      END
+
+   EXEC msdb..sp_send_dbmail 
+       @profile_name = 'SQL_AUTO_MAILER'    
+      ,@recipients = 'nisargupadhyay87@outlook.com'    
+      ,@subject = @subject    
+      ,@importance = 'High'    
+      ,@body = @tableHTML    
+      ,@body_format = 'HTML'; 
+END
+ 
