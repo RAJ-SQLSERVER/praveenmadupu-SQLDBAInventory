@@ -1,0 +1,45 @@
+--Statistics Outdated
+
+Use DBName
+Go
+SELECT [schema_name]        = sc.[name]
+     , [object_id]          = ob.[object_id]
+     , [object_name]        = ob.[name]
+     , stats_id             = st.stats_id
+     , stats_name           = st.[name]
+     , auto_created         = st.auto_created
+     , is_incremental       = st.is_incremental
+     , heap_clustered       = CASE OBJECTPROPERTY( ob.[object_id], 'TableHasClustIndex')
+                              WHEN 1 THEN 'Clustered' ELSE 'Heap' END
+     , partition_number     = ISNULL(it.partition_number,1)     
+     , last_updated         = it.last_updated
+     , [rows]               = it.[rows]
+     , rows_sampled         = it.rows_sampled
+     , percent_sampled      = CONVERT(DECIMAL(5,2), (it.rows_sampled / (it.[rows] * 1.0)) * 100.0)
+     , steps                = it.steps
+     , unfiltered_rows      = it.unfiltered_rows
+     , modification_counter = it.modification_counter
+     , th.threshold
+  FROM sys.stats st WITH(NOLOCK)
+       INNER JOIN sys.tables    ob WITH(NOLOCK) ON ob.[object_id] = st.[object_id]
+       INNER JOIN sys.schemas   sc WITH(NOLOCK) ON sc.[schema_id] = ob.[schema_id]
+       CROSS APPLY ( SELECT it.partition_number     
+                          , it.last_updated
+                          , it.[rows]
+                          , it.rows_sampled
+                          , it.steps
+                          , it.unfiltered_rows
+                          , it.modification_counter
+                       FROM sys.dm_db_stats_properties_internal(st.[object_id],st.stats_id ) it
+                       WHERE ( st.is_incremental = 0  )-- estatísticas não particionadas
+                          OR ( st.is_incremental = 1 AND it.partition_number IS NOT NULL )-- linha detalhe da estatística particionada
+                   ) it
+       CROSS APPLY ( SELECT threshold = CONVERT(INT, CASE WHEN ISNULL(it.[rows],0) <= 25000
+                                                          THEN     (ISNULL(it.[rows],0) *    0.2  ) + 500 -- threshold PADRÃO
+                                                          ELSE SQRT(ISNULL(it.[rows],0) * 1000.0  ) -- TRACEFLAG 2371 (https://www.virtual-dba.com/sql-server-statistics-trace-flag-2371/)
+                                                     END
+                                               )
+                   ) th
+ WHERE ob.is_ms_shipped = 0 
+   AND it.modification_counter > th.threshold
+   AND it.rows > 500
