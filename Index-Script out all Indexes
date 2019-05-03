@@ -1,0 +1,397 @@
+--Script out/store all indexes on a server
+--https://www.sqlservercentral.com/scripts/script-outstore-all-indexes-on-a-server
+The first script creates a table to store the indexes.
+The second script creates the SQL Agent Job.  You can eitherpaste the main segment of code directly into the job step where it says "INSERT CODE FROM ABOVE INTO THIS JOB STEP", or create a stored-procedure, and use that instead.
+Deploy the job/procedure to any server you wish to keep back up your index definitions, setting an appropriate schedule for it to run.
+Use the final portion of code to loop through the table created in step 1, to automagically create the indexes on the target server.
+========================================================================
+   /* Create table to hold indexes */
+CREATE TABLE [dbo].[MasterIndexes](
+	[ServerName] [varchar](75) NOT NULL,
+	[DBName] [varchar](75) NOT NULL,
+	[IndexTable] [varchar](75) NOT NULL,
+	[Type] [varchar](3) NOT NULL,
+	[IndexName] [varchar](500) NOT NULL,
+	[FileGroup] [varchar](25) NOT NULL,
+	[IndexText] [nvarchar](max) NOT NULL,
+ CONSTRAINT [PK_MasterIndexes] PRIMARY KEY CLUSTERED 
+(
+	[ServerName] ASC,
+	[DBName] ASC,
+	[IndexTable] ASC,
+	[Type] ASC,
+	[IndexName] ASC
+)WITH (PAD_INDEX  = OFF, STATISTICS_NORECOMPUTE  = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS  = ON, ALLOW_PAGE_LOCKS  = ON) ON [PRIMARY]
+) ON [PRIMARY]
+
+GO
+
+/* Code to gather indexes in each database on the server */
+SET NOCOUNT ON 
+GO
+
+IF  OBJECT_ID(N'TempDB..#Results') IS NOT NULL
+DROP TABLE #Results
+GO
+IF  OBJECT_ID(N'TempDB..#Indexes') IS NOT NULL
+DROP TABLE #Indexes
+GO
+IF  OBJECT_ID(N'TempDB..#RecCount') IS NOT NULL
+DROP TABLE #RecCount
+GO
+
+DECLARE @i			int
+DECLARE @Recs		int
+DECLARE @Table		sysname
+DECLARE @SQL		varchar(MAX)
+DECLARE @Version varchar(3), @Count int
+SET @Version = UPPER(CONVERT(varchar(3), SERVERPROPERTY('edition')))
+
+/* ######################################### START MAIN PROCEDURE HERE ########################################## */
+
+/* Create Temp Table to store the results in */
+CREATE TABLE #Results (
+	Idx int IDENTITY(1,1), TName sysname
+)
+
+/* Stores the record counts for the indexes in each database */
+CREATE TABLE #RecCount ( 
+	RecCount int
+)
+
+CREATE TABLE #Indexes (
+	DBName sysname, [TableName] sysname, TableID int, IndexID int, IndexName sysname, Sts tinyint, 
+	IsUnique tinyint, IsClustered tinyint, IndexFillFactor tinyint, FileGroup varchar(75), 
+	[Online] varchar(3), keycolumns varchar(8000), includes varchar(8000)
+)
+
+/* Remove Prior Server's Index Records */
+DELETE FROM [YOURSERVER].IndexManagement.dbo.MasterIndexes
+WHERE ServerName = @@SERVERNAME
+	
+/* Fetch All the DB's on the Server */
+INSERT INTO #Results
+	EXEC sp_MSForEachDB 'Use [?]; SELECT DB_NAME()'
+
+/* Get rid of the ones we don't want to index */
+DELETE FROM #Results 
+	WHERE TName IN ('MASTER', 'TEMPDB', 'MODEL', 'MSDB', 'DISTRIBUTION', 'AdventureWorks', 'ReportServer', 'ReportServerTempDB')
+
+/* Loop through the DB's and kick off the magic */
+SET @recs = (SELECT COUNT(1) FROM #Results)
+	WHILE @Recs <> 0
+	BEGIN
+		SET @TABLE = (SELECT Top 1 TName FROM #Results )
+
+		SET @SQL = '
+		DECLARE @Version varchar(3), @Count int
+		SET @Version = UPPER(CONVERT(varchar(3), SERVERPROPERTY(''edition'')))
+
+		USE  ' + CAST(@Table as varchar(250)) + '; 
+		INSERT INTO #Indexes
+		SELECT 
+			''' + RTRIM(@TABLE) + ''',
+			OBJECT_NAME(i.object_id) [tablename], 
+			i.object_id [tableid], 
+			i.index_id [indexid], 
+			i.name [indexname],
+			1 [status],
+			isunique = INDEXPROPERTY(i.object_id, i.name, ''isunique''),
+			isclustered = INDEXPROPERTY(i.object_id, i.name, ''isclustered''),
+			indexfillfactor = INDEXPROPERTY(i.object_id, i.name, ''indexfillfactor''),
+			f.name [filegroup],
+			''ON'' [Online], NULL, NULL
+		FROM sys.indexes i 
+		INNER JOIN sys.all_objects o ON i.object_id = o.object_id AND o.type = ''U'' AND o.is_ms_shipped = 0
+		INNER JOIN sys.filegroups f ON i.data_space_id = f.data_space_id
+		WHERE
+			i.index_id >= 1
+			AND OBJECTPROPERTY(i.object_id, ''IsUserTable'') = 1 
+			AND INDEXPROPERTY(i.object_id, i.name, ''indexfillfactor'') >= 0
+			AND i.index_id < 255                      
+			AND LEFT(OBJECT_NAME(i.object_id), 3) NOT IN (''sys'', ''dt_'', ''MSp'', ''z_d'')  
+			AND o.name NOT IN (
+			SELECT DISTINCT
+							a.name
+					FROM    ' + RTRIM(@TABLE) + '.sys.sysobjects AS a WITH ( READUNCOMMITTED )
+							JOIN ' + RTRIM(@TABLE) + '.sys.syscolumns AS b WITH ( READUNCOMMITTED ) ON a.id = b.id
+							JOIN ' + RTRIM(@TABLE) + '.sys.syscolumns AS c WITH ( READUNCOMMITTED ) ON c.xtype = b.xtype
+					WHERE   b.xType IN ( ''34'', ''35'', ''99'', ''165'',  ''241'' ))
+		UNION ALL
+		SELECT 
+			''' + RTRIM(@TABLE) + ''',
+			OBJECT_NAME(i.object_id) [tablename], 
+			i.object_id [tableid], 
+			i.index_id [indexid], 
+			i.name [indexname],
+			1 [status],
+			isunique = INDEXPROPERTY(i.object_id, i.name, ''isunique''),
+			isclustered = INDEXPROPERTY(i.object_id, i.name, ''isclustered''),
+			indexfillfactor = INDEXPROPERTY(i.object_id, i.name, ''indexfillfactor''),
+			f.name [filegroup],
+			''OFF'' [Online], NULL, NULL
+		FROM sys.indexes i 
+		INNER JOIN sys.all_objects o ON i.object_id = o.object_id AND o.type = ''U'' AND o.is_ms_shipped = 0
+		INNER JOIN sys.filegroups f ON i.data_space_id = f.data_space_id
+		WHERE
+			i.index_id >= 1
+			AND OBJECTPROPERTY(i.object_id, ''IsUserTable'') = 1 
+			AND INDEXPROPERTY(i.object_id, i.name, ''indexfillfactor'') >= 0
+			AND i.index_id < 255                      
+			AND LEFT(OBJECT_NAME(i.object_id), 3) NOT IN (''sys'', ''dt_'', ''MSp'', ''z_d'')  
+			AND o.name IN (
+			SELECT DISTINCT
+							a.name
+					FROM    ' + RTRIM(@TABLE) + '.sys.sysobjects AS a WITH ( READUNCOMMITTED )
+							JOIN ' + RTRIM(@TABLE) + '.sys.syscolumns AS b WITH ( READUNCOMMITTED ) ON a.id = b.id
+							JOIN ' + RTRIM(@TABLE) + '.sys.syscolumns AS c WITH ( READUNCOMMITTED ) ON c.xtype = b.xtype
+					WHERE   b.xType IN ( ''34'', ''35'', ''99'', ''165'',  ''241'' ))
+
+		SET @Count = @@ROWCOUNT
+		INSERT INTO #RecCount SELECT ISNULL(@Count, 0) '
+		EXECUTE (@SQL)
+
+		SET @SQL = '
+		DECLARE @Version varchar(3), @Count int
+		SET @Version = UPPER(CONVERT(varchar(3), SERVERPROPERTY(''edition'')))
+		DECLARE
+			@isql_key varchar(8000),
+			@isql_incl varchar(8000),
+			@tableid int,
+			@indexid int
+		DECLARE index_cursor CURSOR
+		FOR
+		SELECT
+			tableid,
+			indexid
+		FROM
+			#Indexes  
+		OPEN index_cursor
+		FETCH NEXT FROM index_cursor INTO @tableid, @indexid
+		WHILE @@fetch_status <> -1 
+			BEGIN
+		    
+				SELECT
+					@isql_key = '''',
+					@isql_incl = ''''
+		  
+				SELECT 
+					@isql_key = CASE ic.is_included_column
+								  WHEN 0 THEN CASE ic.is_descending_key
+												WHEN 1 THEN @isql_key + COALESCE(sc.name, '''') + '' DESC, ''
+												ELSE @isql_key + COALESCE(sc.name, '''') + '' ASC, ''
+											  END
+								  ELSE @isql_key
+								END,
+		         
+					 @isql_incl = CASE ic.is_included_column
+								   WHEN 1 THEN CASE ic.is_descending_key
+												 WHEN 1 THEN @isql_incl + COALESCE(sc.name, '''') + '', ''
+												 ELSE @isql_incl + COALESCE(sc.name, '''') + '', ''
+											   END
+								   ELSE @isql_incl
+								 END
+				FROM 
+					' + RTRIM(@TABLE) + '.sys.indexes i
+				INNER JOIN ' + RTRIM(@TABLE) + '.sys.index_columns AS ic
+					ON (ic.column_id > 0
+						AND (ic.key_ordinal > 0
+							 OR ic.partition_ordinal = 0
+							 OR ic.is_included_column != 0))
+					   AND (ic.index_id = CAST(i.index_id AS int)
+							AND ic.object_id = i.object_id)
+				INNER JOIN ' + RTRIM(@TABLE) + '.sys.columns AS sc
+					ON sc.object_id = ic.object_id
+					   AND sc.column_id = ic.column_id
+				WHERE
+					i.index_id > 1
+					AND i.index_id < 255
+					AND i.object_id = @tableid
+					AND i.index_id = @indexid
+				ORDER BY
+					i.name,
+					CASE ic.is_included_column
+					  WHEN 1 THEN ic.index_column_id
+					  ELSE ic.key_ordinal
+					END
+		  
+				IF LEN(@isql_key) > 1 
+					SET @isql_key = LEFT(@isql_key, LEN(@isql_key) - 1)
+		   
+				IF LEN(@isql_incl) > 1 
+					SET @isql_incl = LEFT(@isql_incl, LEN(@isql_incl) - 1)
+		  
+				UPDATE
+					#Indexes
+				SET 
+					keycolumns = @isql_key,
+					includes = @isql_incl
+				WHERE
+					tableid = @tableid
+					AND indexid = @indexid
+				FETCH NEXT FROM index_cursor INTO @tableid, @indexid
+			END
+		CLOSE index_cursor
+		DEALLOCATE index_cursor'
+		EXECUTE (@SQL)
+    		
+	
+	/* Add Updated Index Records to the Master List */
+	IF ((SELECT COUNT(1) FROM #RecCount) > 0)
+	BEGIN
+	INSERT INTO [LINKEDSERVER].IndexManagement.dbo.MasterIndexes
+		SELECT CAST(@@SERVERNAME as varchar(75)), CAST(@Table as varchar(75))
+			, tablename [Table], CASE WHEN (IsClustered = 0) THEN 'NCI' ELSE 'CLU' END [Type],
+			INDEXNAME [Index], [FileGroup],
+		'USE ' + CAST(@Table as varchar(250)) 
+			+ '; IF  EXISTS (SELECT * FROM sys.indexes WHERE object_id = OBJECT_ID(N''[dbo].' + QUOTENAME(TABLENAME) 
+			+ ''') AND name = N''' + INDEXNAME + ''') DROP INDEX ' + QUOTENAME(INDEXNAME) + ' ON [dbo].' + QUOTENAME(TABLENAME) 
+			+ ' WITH ( ONLINE = OFF );  CREATE ' + CASE WHEN ISUNIQUE = 1 THEN 'UNIQUE '
+						 ELSE ''
+					END + CASE WHEN ISCLUSTERED = 1 THEN 'CLUSTERED ' ELSE 'NONCLUSTERED '
+				END + 'INDEX ' + QUOTENAME(INDEXNAME) + ' ON dbo.' + QUOTENAME(TABLENAME) + ' (' + keycolumns + ')'
+		+ CASE WHEN INDEXFILLFACTOR = 0
+					AND ISCLUSTERED = 1
+					AND INCLUDES = '' THEN ''
+			   WHEN INDEXFILLFACTOR = 0
+					AND ISCLUSTERED = 0
+					AND INCLUDES = '' THEN ' WITH (MAXDOP=4, ONLINE = ' 
+						+ CASE WHEN (@Version = 'STA') THEN 'OFF' ELSE [ONLINE] END + ') ON [' 
+						+ FILEGROUP + ']['
+			   WHEN INDEXFILLFACTOR <> 0
+					AND ISCLUSTERED = 0
+					AND INCLUDES = '' THEN ' WITH (MAXDOP=4, ONLINE = ' 
+						+ CASE WHEN (@Version = 'STA') THEN 'OFF' ELSE [ONLINE] END + ', FILLFACTOR = ' 
+						+ CONVERT(varchar(10), INDEXFILLFACTOR) + ') ON ['
+						+ FILEGROUP + ']'                
+			   WHEN INDEXFILLFACTOR = 0
+					AND ISCLUSTERED = 0
+					AND INCLUDES <> '' THEN ' INCLUDE (' + INCLUDES + ') WITH (MAXDOP=4, ONLINE = '
+					+ CASE WHEN (@Version = 'STA') THEN 'OFF' ELSE [ONLINE] END + ') ON ['
+					+ FILEGROUP + ']'
+			   ELSE ' INCLUDE(' + INCLUDES + ') WITH (MAXDOP=4, FILLFACTOR = ' 
+					+ CONVERT(varchar(10), INDEXFILLFACTOR) + ', ONLINE = '
+					+ CASE WHEN (@Version = 'STA') THEN 'OFF' ELSE [ONLINE] END + ') ON ['
+					+ FILEGROUP + ']'
+		  END
+	FROM #Indexes
+	ORDER BY tablename, indexid, indexname
+	END
+
+		DELETE FROM #Results WHERE TName = @Table
+		SET @recs = (SELECT COUNT(1) FROM #Results)
+		TRUNCATE TABLE #RecCount
+		TRUNCATE TABLE #Indexes
+	END	
+
+DROP TABLE #Results
+DROP TABLE #Indexes
+
+SET NOCOUNT OFF
+GO
+
+
+
+/* Script to create the Agent job */
+USE [msdb]
+GO
+
+/****** Object:  Job [DBA - Generate Index Create Scripts for ALL servers]    Script Date: 08/26/2013 22:11:06 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [Database Maintenance]    Script Date: 08/26/2013 22:11:07 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Database Maintenance' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Database Maintenance'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'DBA - Generate Index Create Scripts for ALL servers', 
+		@enabled=1, 
+		@notify_level_eventlog=2, 
+		@notify_level_email=2, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'1/4/2013 - Tweaked query to look through all DB''s on the entrie server, inserting them into the MasterIndexes table in the IndexManagement DB.  Runs Daily', 
+		@category_name=N'Database Maintenance', 
+		@owner_login_name=N'SomeUser', 
+		@notify_email_operator_name=N'DBA', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Fetch Server Indexes]    Script Date: 08/26/2013 22:11:07 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Fetch Server Indexes', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'INSERT CODE FROM ABOVE INTO THIS JOB STEP', 
+		@database_name=N'master', 
+		@flags=4
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Daily', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20121212, 
+		@active_end_date=99991231, 
+		@active_start_time=233700, 
+		@active_end_time=235959, 
+		@schedule_uid=N'cc8f8a83-7c7f-4315-b159-6832fdab97f3'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
+
+
+
+DECLARE @Indexes TABLE (idx int IDENTITY( 1,1 ), IndexText varchar (MAX))
+DECLARE @idx int , @iText varchar (MAX)
+
+INSERT INTO @Indexes
+SELECT IndexText
+FROM [IndexManagement]. [dbo].[MasterIndexes]
+WHERE
+    ServerName = 'YOU SERVER'
+    AND DBName IN ('YOUR DATABASES')
+    AND [Type] <> 'CLU'
+ORDER BY DBName DESC
+
+WHILE (SELECT TOP 1 idx FROM @Indexes) > 0
+BEGIN
+        SELECT TOP 1 @idx = Idx , @iText = IndexText FROM @Indexes
+        BEGIN TRY
+               PRINT 'CREATING INDEX: ' + @iText
+               EXEC (@iText )
+               WAITFOR DELAY '00:00:00:250'
+        END TRY
+       
+        BEGIN CATCH
+        /* Required Parameters: @To, @Origin, @Object
+                 If @Origin = 1 – This means a Stored-Procedure, specify @Object = Proc Name
+                 If @Origin = 2 – This means a SQL Agent Job, specify @Object = Job Name
+                 If @Origin = 3 – This means standard TSQL, specify @Object = ‘TSQL’ */
+                 EXEC MyDatabase. dbo.dba_SendEmailNotification @Origin = 3,
+                       @Object = 'TSQL - Issue creating indexes' , @Msg = @iText,@spid = @@SPID
+        END CATCH
+        DELETE FROM @Indexes WHERE idx = @idx
+END
