@@ -1,0 +1,755 @@
+--Server Disk Space report
+
+ --############################################################################################################################
+--
+--This script is being offered for public use and as such is being offered as untested and unverified.
+--Please use this script at your own risk, as I take NO responsibility for it's use elsewhere in environments 
+--that are NOT under my control. 
+--Redistribution or sale of these scripts and sprocs, in whole or in part, is prohibited! 
+ 
+--Always ensure that you run such scripts in test prior to production and perform due diligence as to whether they meet yours, 
+--or your company needs!
+--
+-- you will need to replace any item enclosed in <> with your own values!
+--
+--############################################################################################################################
+
+USE [<your admin DB>]
+GO
+
+/****** Object:  Table [<your admin schema>].[drivespace]    Script Date: 10/03/2012 10:00:10 ******/
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[<your admin schema>].[drivespace]') AND type in (N'U'))
+DROP TABLE [<your admin schema>].[drivespace]
+GO
+
+USE [<your admin DB>]
+GO
+
+/****** Object:  Table [<your admin schema>].[drivespace]    Script Date: 10/03/2012 10:00:10 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+SET ANSI_PADDING ON
+GO
+
+CREATE TABLE [<your admin schema>].[drivespace](
+	[drive] [char](1) NULL,
+	[FreeSpace] [int] NULL,
+	[TotalSize] [int] NULL,
+	[percentfree] [int] NULL,
+	[metricdate] [datetime] NULL,
+	[servername] [varchar](50) NULL
+) ON [DATA]
+
+GO
+
+SET ANSI_PADDING OFF
+GO
+
+USE [<your admin DB>]
+GO
+
+/****** Object:  StoredProcedure [<your admin schema>].[check_server_disk_space]    Script Date: 10/03/2012 09:59:53 ******/
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[<your admin schema>].[check_server_disk_space]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [<your admin schema>].[check_server_disk_space]
+GO
+
+/****** Object:  StoredProcedure [<your admin schema>].[<your admin schema>_server_disk_space_report]    Script Date: 10/03/2012 09:59:53 ******/
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[<your admin schema>].[<your admin schema>_server_disk_space_report]') AND type in (N'P', N'PC'))
+DROP PROCEDURE [<your admin schema>].[<your admin schema>_server_disk_space_report]
+GO
+
+USE [<your admin DB>]
+GO
+
+/****** Object:  StoredProcedure [<your admin schema>].[check_server_disk_space]    Script Date: 10/03/2012 09:59:53 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+-- ###################################################################################
+--
+-- Author:			Haden Kingsland
+--
+-- Date:			2nd October 2012
+--
+-- Description :	To use OLE object calls and xp_fixeddrives to return information 
+--					regarding the drive allocated to a particular server. It then stores 
+--					this information within the <your admin schema>.drivespace table within the <your admin DB>
+--					database for that instance.
+--
+--
+-- useage -- exec <your admin schema>.check_server_disk_space
+--
+-- You WILL need to create this table prior to running this procedure
+--
+--create table <your admin DB>.<your admin schema>.drivespace
+--(
+--    drive		char (1), --	primary key,
+--    FreeSpace	int			null,
+--    TotalSize	int			null,
+--    percentfree int			null,
+--    metricdate	datetime,
+--    servername	varchar(50)
+--);
+
+-- drop table <your admin DB>.<your admin schema>.drivespace
+-- truncate table <your admin DB>.<your admin schema>.drivespace
+-- select * from <your admin DB>.<your admin schema>.drivespace order by drive asc
+
+--select MAX(percentfree), * 
+--from <your admin DB>.<your admin schema>.drivespace
+----where  DATEdiff(mi, metricdate, GetDate()) > 20 -- return results for 'n' minutes ago
+--where  DATEdiff(dd, metricdate, GetDate()) > 1 -- return results for the previous day
+--group by percentfree, drive, 
+--totalsize,freespace,
+--metricdate,
+--servername
+--order by drive asc
+--
+-- ###################################################################################
+
+create procedure [<your admin schema>].[check_server_disk_space]
+
+AS
+
+BEGIN
+
+declare @hr as int,
+		@fso as int,
+		@drive as char (1),
+		@odrive as int,
+		@TotalSize as varchar (20),
+		@freespace as int,
+		@percentused as int,
+		@OLEAUTOMATION_ORIG_ON varchar(1),
+		@MB as numeric;
+
+---------------------
+-- Initialize variables
+---------------------
+
+set @OLEAUTOMATION_ORIG_ON = ''
+
+--------------------------------------------------------------------------------------------------------------------
+-- Check whether Ole Automation is turned off via Surface Area Configuration (2005) / Instance Facets (2008)
+-- This is best practice !!!!! If it is already turned on, LEAVE it on !!
+
+-- turn on advanced options
+	EXEC sp_configure 'show advanced options', 1 reconfigure 
+	RECONFIGURE  
+
+	CREATE TABLE #advance_opt 
+	(
+	name VARCHAR(50),
+	min int, 
+	max int, 
+	conf int, 
+	run int
+	)
+		INSERT #advance_opt
+		EXEC sp_configure 'Ole Automation Procedures' -- this will show whether xp_cmdshell is turned on or not
+				
+	IF (select conf from #advance_opt) = 0 -- check if Ole Automation is turned on or off, if off, then turn it on
+		BEGIN
+
+			set @OLEAUTOMATION_ORIG_ON = 'N' -- make a note that it is NOT supposed to be on all the time
+			
+			--turn on Ole Automation to allow OLE commands to be run
+			EXEC sp_configure 'Ole Automation Procedures', 1 
+			RECONFIGURE
+		END
+	ELSE
+		BEGIN
+		 -- make a note that Ole Automation was already turned on, so not to turn it off later by mistake
+			set @OLEAUTOMATION_ORIG_ON = 'Y'
+		END
+
+-- drop the temporary table to tidy up after ourselves.
+
+	IF EXISTS (
+	select * from tempdb.sys.objects
+	where name like '%advance_opt%'
+	)
+		BEGIN
+			drop table #advance_opt
+		END	
+--------------------------------------------------------------------------------------------------------------------
+set @MB = 1048576; -- values are in kb's, so divide by 1024 and then 1024 again (1048576)
+
+create table #drives
+(
+    drive		char (1)	primary key,
+    FreeSpace	int			null,
+    TotalSize	int			null,
+    percentfree int			null,
+    metricdate	datetime,
+    servername	varchar(80)
+);
+
+insert #drives (drive, FreeSpace)
+execute master.dbo.xp_fixeddrives
+
+execute @hr = sp_OACreate 'Scripting.FileSystemObject', @fso output
+
+if @hr <> 0
+    execute sp_OAGetErrorInfo @fso
+
+declare drivesize_cursor cursor local fast_forward
+    for select   drive,
+				 freespace
+        from     #drives
+        order by drive
+
+open drivesize_cursor
+
+fetch next from drivesize_cursor 
+into @drive, 
+@freespace
+
+while @@FETCH_STATUS = 0
+    begin
+        execute @hr = sp_OAMethod @fso, 'GetDrive', @odrive output, @drive
+        
+        if @hr <> 0
+            execute sp_OAGetErrorInfo @fso
+            
+        execute @hr = sp_OAGetProperty @odrive, 'TotalSize', @TotalSize output
+        
+        if @hr <> 0
+            execute sp_OAGetErrorInfo @odrive
+            
+        update  #drives
+            set TotalSize = convert(numeric,@TotalSize) / @MB,
+            percentfree = (@freespace*100)/(@TotalSize / @MB),
+            metricdate = GETDATE(),
+            servername = LTRIM(left(@@SERVERNAME,(len(@@SERVERNAME))-(charindex('\',reverse(@@SERVERNAME)))))
+        where   drive = @drive
+        
+        INSERT INTO <your admin DB>.<your admin schema>.drivespace
+        select * from #drives where drive = @drive
+
+        fetch next from drivesize_cursor 
+        into @drive, 
+        @freespace
+        
+    end
+
+close drivesize_cursor
+deallocate drivesize_cursor
+
+execute @hr = sp_OADestroy @fso
+
+if @hr <> 0
+    execute sp_OAGetErrorInfo @fso
+
+
+drop table #drives
+
+----------------------------------------------------------------------------------------------------------------------		
+-- turn off advanced options
+
+	IF @OLEAUTOMATION_ORIG_ON = 'N'  -- if Ole Automation was NOT originally turned on, then turn it off 
+	BEGIN
+
+		--  turn off Ole Automation if it was not already turned on
+		EXEC sp_configure 'Ole Automation Procedures', 0  reconfigure
+		RECONFIGURE
+
+		EXEC sp_configure 'show advanced options', 0 reconfigure
+		RECONFIGURE
+		
+	END
+-----------------------------------------------------------------------------------------------------------------------
+					
+END;
+
+GO
+
+/****** Object:  StoredProcedure [<your admin schema>].[<your admin schema>_server_disk_space_report]    Script Date: 10/03/2012 09:59:53 ******/
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+
+-- ###################################################################################
+--
+-- Author:			Haden Kingsland
+--
+-- Date:			2nd October 2012
+--
+-- Description :	To report on datafile growth from the [<your admin schema>].[check_server_disk_space]
+--					stored procedure which is run at 05:15 everyday. It checks the 
+--					<your admin schema>.drivespace table within the <your admin DB> database and reports on 
+--					current disk size and available free space.
+--
+-- ###################################################################################
+-- useage:
+--exec <your admin DB>.<your admin schema>.<your admin schema>_server_disk_space_report 1,'youremailaddress.com'
+
+CREATE procedure [<your admin schema>].[<your admin schema>_server_disk_space_report]
+ (
+    @days	int, -- number of days to report back from
+    @recipient_list varchar(2000) -- list of people to email
+ )
+as
+
+BEGIN
+
+DECLARE		@MailProfileName VARCHAR(50),		
+			@ERR_MESSAGE varchar(200),
+			@ERR_NUM int,
+			@MESSAGE_BODY varchar(2000),
+			@MESSAGE_BODY2 varchar(1000),
+			@p_error_description varchar(300),
+			@NewLine CHAR(2),
+			@Q CHAR(1),
+			@tableHTML VARCHAR(MAX),
+			@tableHTML2 VARCHAR(MAX),
+			@lineHTML VARCHAR(MAX),
+			@lineHTML2 VARCHAR(MAX),
+			@start_table VARCHAR(MAX),
+			@start_table2 VARCHAR(MAX),
+			@TR varchar(20),
+			@END	 varchar(30),
+			@END_TABLE varchar(30),
+			@ENDTAB varchar(20),
+			@email varchar(100),
+			@value varchar(30),
+			@mailsubject varchar(200),
+			@propertyid int,
+			@userid bigint, 
+			@property_value varchar(1000),
+			@output VARCHAR(1000),
+			@failsafe VARCHAR(100),
+			@type varchar(10), 
+			@drive char(1),
+			@freespace int,
+			@totalsize int,
+			@percentfree int,
+			@MetricDate datetime,
+			@servername varchar(50),
+			@period	int,
+			--@days int,
+			--@recipient_list	varchar(1000),
+			@td varchar(25);
+
+SET @NewLine = CHAR(13) + CHAR(10) 
+SET @Q = CHAR(39) 
+
+-- initialize variables (otherwise concat fails because the variable value is NULL)
+set @lineHTML = '' 
+set @tableHTML = ''
+set @start_table = ''
+--set @days = 20
+
+SET @tableHTML =
+		'<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Frameset// EN">' +
+		'<html>' +
+		'<LANG="EN">' +
+		'<head>' +
+		'<TITLE>SQL Administration</TITLE>' +
+		'</head>' +
+		'<body>'
+		
+set @start_table = '<font color="black" face="Tahoma" >' + 
+	'<CENTER>' + 
+	'<H1><font size=4>DB Server Mount Point Sizes for SQL instance... '+ @@servername + ' as of 05:30am on ' + 
+	CONVERT(VARCHAR(11),GETDATE(),113) + '</font></H1>' +
+	'<table border="1">' +
+	'<tr BGCOLOR="green">' + 
+	-- list all table headers here
+	'<th BGCOLOR="#0066CC" width="100%" colspan="6">DB Server Mount Point Sizes</th>'+'</tr>' + 
+	'<tr>' + 
+	'<th BGCOLOR="#99CCFF">Drive Letter</th>' + 
+	'<th BGCOLOR="#99CCFF">Metric Date</th>' +
+	'<th BGCOLOR="#99CCFF">Free Space</th>' +
+	'<th BGCOLOR="#99CCFF">Total Size</th>' + 
+	'<th BGCOLOR="#99CCFF">Percentage Free</th>' +
+	'<th BGCOLOR="#99CCFF">Servername</th>' + 
+	'</tr>'
+				
+
+SET @TR = '</tr>'
+SET @ENDTAB = '</table></font>'
+--SET @END = '</table></font></body></html>'
+SET @END_TABLE = '</table></font>'
+SET @END = '</body></html>'
+
+SET @mailsubject   = 'Current Drive Space for ' + LTRIM(left(@@SERVERNAME,(len(@@SERVERNAME))-(charindex('\',reverse(@@SERVERNAME))))) + ' on ' + CONVERT(VARCHAR(11),GETDATE(),113)
+
+SELECT @MailProfileName = name
+FROM msdb.dbo.sysmail_profile WITH (NOLOCK)
+where name like '%<your mail profile name>%'
+
+PRINT @MailProfileName
+
+	BEGIN TRY
+	
+DECLARE build_report CURSOR
+FOR
+select   dsp.drive,
+         max(dsp.freespace),
+         dsp.totalsize,
+         dsp.percentfree,
+         max(dsp.metricdate),
+         dsp.servername
+from     <your admin DB>.<your admin schema>.drivespace as dsp
+where DATEPART(dd,dsp.metricdate) = DATEPART(dd,getdate()) -- only return information for the run of the current morning
+--where    DATEdiff(mi, dsp.metricdate, GetDate()) > @days -- return results for 'n' minutes ago -- uncomment to suit your requirements
+--where  DATEdiff(dd, dsp.metricdate, GetDate()) > @days -- return results for the previous day -- uncomment to suit your requirements
+group by dsp.drive, dsp.totalsize, dsp.percentfree, dsp.servername
+order by dsp.drive asc;
+
+		-- Open the cursor.
+		OPEN build_report;
+
+		-- Loop through the update_stats cursor.
+
+		FETCH NEXT
+		   FROM build_report
+		   INTO  @drive, 
+		   @freespace,
+		   @totalsize,
+		   @percentfree,
+		   @metricdate,
+		   @servername
+
+		--PRINT 'Fetch Status is ... ' + CONVERT(VARCHAR(10),@@FETCH_STATUS)
+
+		WHILE @@FETCH_STATUS <> -1 -- Stop when the FETCH statement fails or the row is beyond the result set
+		BEGIN
+
+			IF @@FETCH_STATUS = 0 -- to ignore -2 status "The row fetched is missing"
+			BEGIN
+
+				set @lineHTML = RTRIM(LTRIM(@lineHTML)) + 
+								'<tr>' + 
+								'<td>' + ISNULL(cast(@drive as varchar(5)),'NOVAL') + '</td>' +
+								'<td>' +  ISNULL(left(convert (char(20) ,@MetricDate, 113 ), 17),'NOVAL') + '</td>' +
+								'<td>' +  ISNULL(cast(@freespace as varchar(10)) + ' MB','NOVAL') + '</td>' +
+								'<td>' +  ISNULL(cast(@totalsize as varchar(10)) + ' MB','NOVAL') + '</td>' +
+								'<td>' +  ISNULL(cast(@percentfree as varchar(5))+ ' %','NOVAL') + '</td>' +
+								'<td>' +  ISNULL(cast(@servername as varchar(50)),'NOVAL') + '</td>'
+								+ '</tr>'
+								
+				IF @percentfree <= 10
+				BEGIN
+					set @lineHTML = REPLACE( @lineHTML, '<td>', '<td BGCOLOR=#FF0000>' ); -- red
+				END
+				IF (@percentfree > 10 
+				and @percentfree <= 40)
+				BEGIN
+					set @lineHTML = REPLACE( @lineHTML, '<td>', '<td BGCOLOR=#FFFF00>' ); -- yellow
+				END
+				IF @percentfree > 40 
+				BEGIN
+					set @lineHTML = REPLACE( @lineHTML, '<td>', '<td BGCOLOR=#66FF33>' ); -- green
+				END
+				
+				print @lineHTML
+
+			END
+		
+		FETCH NEXT
+		   FROM build_report
+		   INTO  @drive, 
+		   @freespace,
+		   @totalsize,
+		   @percentfree,
+		   @metricdate,
+		   @servername
+
+		END
+
+		-- Close and deallocate the cursor.
+
+		CLOSE build_report;
+		DEALLOCATE build_report;
+	
+		set @tableHTML = RTRIM(LTRIM(@tableHTML)) + @start_table + RTRIM(LTRIM(@lineHTML)) + @END_TABLE + @END
+
+		-- as the <td> tags are auto-generated, I need to replace then with a new <td>
+		-- tag including all the required formatting.
+
+		print @tableHTML
+	
+		IF @recipient_list IS NULL 
+		or @recipient_list = ''
+		BEGIN
+		
+			SELECT @recipient_list = email_address
+			FROM msdb..sysoperators
+			WHERE name = '<your required operator>' -- Name of main required operator
+			
+			IF @recipient_list IS NULL
+			BEGIN
+						
+				EXECUTE master.dbo.xp_instance_regread N'HKEY_LOCAL_MACHINE',
+											 N'SOFTWARE\Microsoft\MSSQLServer\SQLServerAgent',
+											 N'AlertFailSafeOperator',
+											 @failsafe OUTPUT,
+											 N'no_output'
+
+				SELECT @recipient_list = email_address
+				FROM msdb..sysoperators
+				WHERE name = @failsafe
+				                             
+			END
+		END
+		
+		PRINT @recipient_list
+		
+			EXEC msdb.dbo.sp_send_dbmail
+				@profile_name = @MailProfileName,
+				@recipients = @recipient_list,
+				@body_format = 'HTML',
+				@importance = 'HIGH',
+				@body = @tableHTML,
+				@subject = @mailsubject
+	
+	END TRY
+
+	BEGIN CATCH
+	
+	print 'Error Code is ... ' + RTRIM(CONVERT(CHAR(10),@ERR_NUM)) + ' Error Message is ... ' + @ERR_MESSAGE
+	
+		SELECT @ERR_MESSAGE = ERROR_MESSAGE(), @ERR_NUM = ERROR_NUMBER();
+		SET @MESSAGE_BODY='Error running the ''Database Growth Report'' ' 
+		+  '. Error Code is ... ' + RTRIM(CONVERT(CHAR(10),@ERR_NUM)) + ' Error Message is ... ' + @ERR_MESSAGE
+		SET @MESSAGE_BODY2='The script failed whilst running against the... ' + LTRIM(RTRIM(cast(@@SERVERNAME as VARCHAR(30)))) + ' instance'
+		SET @MESSAGE_BODY = @MESSAGE_BODY -- + @MESSAGE_BODY3
+
+		EXEC msdb.dbo.sp_notify_operator 
+			@profile_name = @MailProfileName, 
+			@name=N'<your required operator>',
+			@subject = @MESSAGE_BODY2, 
+			@body= @MESSAGE_BODY
+
+	END CATCH
+	
+END
+
+
+GO
+
+
+--####################################################################################
+--
+-- Set up SQL Agent jobs
+--
+--####################################################################################
+
+USE [msdb]
+GO
+
+/****** Object:  Job [Clean up <your admin DB> Tables Daily]    Script Date: 10/03/2012 10:02:53 ******/
+IF  EXISTS (SELECT job_id FROM msdb.dbo.sysjobs_view WHERE name = N'Clean up <your admin DB> Tables Daily')
+EXEC msdb.dbo.sp_delete_job @job_name=N'Clean up <your admin DB> Tables Daily', @delete_unused_schedule=1
+GO
+
+USE [msdb]
+GO
+
+/****** Object:  Job [Clean up <your admin DB> Tables Daily]    Script Date: 10/03/2012 10:02:53 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [Database Maintenance]    Script Date: 10/03/2012 10:02:53 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Database Maintenance' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Database Maintenance'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'Clean up <your admin DB> Tables Daily', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=2, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'Tidy up job for disk growth report', 
+		@category_name=N'Database Maintenance', 
+		@owner_login_name=N'sa', 
+		@notify_email_operator_name=N'<your operator name>', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Clean Up <your admin DB> tables daily]    Script Date: 10/03/2012 10:02:54 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Clean Up <your admin DB> tables daily', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'delete from <your admin DB>.<your admin schema>.drivespace where metricdate < GETDATE()-15', 
+		@database_name=N'<your admin DB>', 
+		@flags=4
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'<your admin DB> CleanUp Schedule', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20121004, 
+		@active_end_date=99991231, 
+		@active_start_time=100500, 
+		@active_end_time=235959
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
+
+/****** Object:  Job [Database Server Check Disk Space]    Script Date: 10/03/2012 09:59:06 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]]    Script Date: 10/03/2012 09:59:06 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'Database Server Check Disk Space', 
+		@enabled=1, 
+		@notify_level_eventlog=2, 
+		@notify_level_email=2, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'exec <your admin schema>.check_server_disk_space', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'sa', 
+		@notify_email_operator_name=N'<your operator name>', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Check Database Server disk space]    Script Date: 10/03/2012 09:59:07 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Check Database Server disk space', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'exec <your admin schema>.check_server_disk_space', 
+		@database_name=N'<your admin DB>', 
+		@flags=4
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Check Database Disk Sizes', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20121003, 
+		@active_end_date=99991231, 
+		@active_start_time=51500, 
+		@active_end_time=235959
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
+
+/****** Object:  Job [Database Server Disk Space Report]    Script Date: 10/03/2012 09:59:07 ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]]    Script Date: 10/03/2012 09:59:07 ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'Database Server Disk Space Report', 
+		@enabled=1, 
+		@notify_level_eventlog=2, 
+		@notify_level_email=2, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'exec <your admin DB>.<your admin schema>.<your admin schema>_server_disk_space_report 1,''<youremailaddress.com>''', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'sa', 
+		@notify_email_operator_name=N'<your operator name>', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [Run disk space report]    Script Date: 10/03/2012 09:59:07 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'Run disk space report', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'exec <your admin DB>.<your admin schema>.<your admin schema>_server_disk_space_report 1,''<youremailaddress.com>''', 
+		@database_name=N'<your admin DB>', 
+		@flags=4
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Disk space report', 
+		@enabled=1, 
+		@freq_type=4, 
+		@freq_interval=1, 
+		@freq_subday_type=1, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20121003, 
+		@active_end_date=99991231, 
+		@active_start_time=53000, 
+		@active_end_time=235959
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
