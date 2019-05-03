@@ -1,0 +1,39 @@
+--Trace File Report
+USE MASTER
+GO
+declare @tracelocation varchar(4000);
+declare @CMD varchar(2000);
+declare @count int
+CREATE TABLE #CommandShell (ID int identity(1,1), [FileName] VARCHAR(1024), FullFileName varchar(1024));
+set @tracelocation = (SELECT REVERSE(SUBSTRING(REVERSE(path), CHARINDEX('\', REVERSE(path)), 256)) FROM sys.traces WHERE is_default = 1);
+SET @CMD = 'DIR ' + @tracelocation + '*.TRC' + '/B'
+
+INSERT INTO #CommandShell ([FileName])
+EXEC MASTER..xp_cmdshell @CMD 
+
+DELETE FROM #CommandShell where [FileName] is null
+UPDATE #CommandShell
+SET [FullFileName] = CAST(@tracelocation AS VARCHAR(4000)) +  CAST([FileName] AS VARCHAR(100))
+
+select @count = max(id) from #CommandShell
+declare @i int=1
+declare @cur_file varchar(1024), @cur_file_only varchar(1024)
+WHILE (@i<=@count)
+BEGIN
+select @cur_file = (select [FullFileName] from #CommandShell where [ID] = @i)
+select @cur_file_only = (select [FileName] from #CommandShell where [ID] = @i)
+ select ObjectName
+   ,       DatabaseName
+   ,       StartTime
+   ,       EventClass
+   ,       EventSubClass
+   ,       ObjectType
+   ,       ServerName
+   ,       LoginName
+   ,       ApplicationName
+   ,       @cur_file_only as [FileName]
+   from ::fn_trace_gettable( @cur_file, default ) 
+   where EventClass in (164, 46,47,108,104, 110, 152,117) and EventSubclass = 0 and DatabaseID =5
+   set @i = @i +1
+END
+drop table #CommandShell
