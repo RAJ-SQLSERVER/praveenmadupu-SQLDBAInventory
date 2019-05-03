@@ -1,0 +1,24 @@
+--Audit--DB--Orphaned login report for all databases
+
+use master 
+go
+set nocount on
+DECLARE @dbname varchar(255) 
+DECLARE db_loop CURSOR
+	READ_ONLY FOR
+	Select [name] from master..sysdatabases
+		where [name] not in ('tempdb') 
+ OPEN db_loop
+
+FETCH NEXT FROM db_loop INTO @dbname
+	WHILE (@@fetch_status <> -1)
+	BEGIN
+ 
+ EXEC ('EXEC [' + @dbname + '].dbo.sp_change_users_login @Action=Report')
+
+	FETCH NEXT FROM db_loop INTO @dbname
+	END
+
+CLOSE db_loop
+DEALLOCATE db_loop
+GO
