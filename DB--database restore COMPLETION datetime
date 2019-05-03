@@ -1,0 +1,19 @@
+--DB--database restore COMPLETION datetime
+For restorehistory, BOL says [restore_date] is the Date and time of the completion of the restore operation. 
+My test shows otherwise. it appears to be the start datetime of restore operation. Inspired by Steve's post,  
+I came up with this script to show the actual completion datetime of database restore operation.
+The idea behind is SQL error log always contain the an entry of restore operation in the end of db restore. 
+something like "Restore is complete on database 'my_database'.  The database is now available."
+
+
+-- list database restore COMPLETION datetime
+DECLARE @dt_start datetime = GETDATE() - 7 -- 7 days ago for most recent possible restore operation
+DECLARE @dt_end datetime = GETDATE()
+DECLARE @dbrestored TABLE (logdate datetime, processinfo varchar(25), infotext varchar(500))
+INSERT INTO @dbrestored 
+EXEC xp_readerrorlog 0, 1, N'Restore is complete', N'The database is now available.', @dt_start, @dt_end, 'DESC'
+
+SELECT SUBSTRING(infotext,34, (CHARINDEX ('''', infotext, 34)-34)) AS database_name
+	, logdate
+	, infotext 
+FROM @dbrestored
