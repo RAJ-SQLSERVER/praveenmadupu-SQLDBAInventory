@@ -1,0 +1,75 @@
+--DB--Backup Growth Trend Check
+xp_fixeddrives
+
+-- Backup Growth Trend Check To Understand how much disk space you need in future
+set nocount on
+GO
+
+DECLARE @path NVARCHAR(4000) 
+
+EXEC master.dbo.xp_instance_regread 
+     N'HKEY_LOCAL_MACHINE', 
+     N'Software\Microsoft\MSSQLServer\MSSQLServer',N'BackupDirectory', 
+     @path OUTPUT,  
+    'no_output' 
+SELECT @path 'DEFAULT BACKUP PATH'
+GO
+IF OBJECT_ID('tempdb..#table_bkp_size') IS NOT NULL
+
+    DROP TABLE #table_bkp_size
+GO
+select distinct @@servername 'ServerName', convert(varchar,a.backup_start_date,101) 'Date', a.database_name 'DB Name', 
+convert(decimal(8,2),round(sum(b.file_size/1024/1024),4)) as 'Database Size in(MB)'
+into #table_bkp_size
+from	msdb..backupset  a
+inner join msdb..backupfile b on a.backup_set_id = b.backup_set_id
+--where	convert(varchar,a.backup_start_date,101) = convert(varchar,getdate(),101)
+where	convert(varchar,a.backup_start_date,101) >= GETDATE() - 7
+		and a.database_name in ( select name from sys.databases where database_id  not in(1,2,3,4))
+		and a.type = 'd'
+		and b.file_type = 'd' and is_snapshot = 0 
+		group by a.backup_set_id, a.database_name, a.backup_start_date
+		order by a.database_name
+
+GO
+
+--select * from  #table_bkp_size
+
+select [DB NAME], max([Database Size in(MB)]) 'Max_DB_BKP_Size_MB' from  #table_bkp_size
+group by [DB NAME]
+Order by 2 desc
+
+
+select [DB NAME], min([Database Size in(MB)]) 'Min_DB_BKP_Size_MB' from  #table_bkp_size
+group by [DB NAME]
+Order by 2 desc
+
+IF OBJECT_ID('tempdb..#table_avg_bkp_size') IS NOT NULL
+
+    DROP TABLE #table_avg_bkp_size
+GO
+
+
+select [DB NAME], convert(decimal(8,2), avg([Database Size in(MB)])) 'AVG_DB_BKP_Size_MB' 
+into #table_avg_bkp_size
+from  #table_bkp_size
+group by [DB NAME]
+--Order by [Database Size in(MB)]
+
+
+
+--select [DB NAME], max([Database Size in(MB)]) '[MAX_Database Size in(MB)]' from #table_bkp_size
+--group by [DB NAME]
+--Order by 2 desc
+
+
+select * from #table_avg_bkp_size
+
+select CEILING(convert(decimal(8,2), sum(AVG_DB_BKP_Size_MB))) 'Calculated_Daily_Bkp_Size_OF_All_DBs_in_MB (based on avg count of size)' 
+from #table_avg_bkp_size
+
+
+select CEILING(convert(decimal(8,2), sum(AVG_DB_BKP_Size_MB))/1024) 'Calculated_Daily_Bkp_Size_OF_All_DBs_in_GB (based on avg count of size)' 
+from #table_avg_bkp_size
+
+set nocount off
