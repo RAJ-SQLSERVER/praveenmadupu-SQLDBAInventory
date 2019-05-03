@@ -1,0 +1,179 @@
+--Defragmentation and update statistics for all online databases
+--This is a script that to defragment and update statistics for all online databases.
+--After executing this script please run this job - for this you should have agent service enabled.
+
+USE [msdb]
+GO
+
+/****** Object:  Job [defragmentation_and_statistics]    Script Date: 3/4/2014 10:55:14 AM ******/
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+/****** Object:  JobCategory [[Uncategorized (Local)]]]    Script Date: 3/4/2014 10:55:14 AM ******/
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'[Uncategorized (Local)]' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'[Uncategorized (Local)]'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'defragmentation_and_statistics', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=0, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'No description available.', 
+		@category_name=N'[Uncategorized (Local)]', 
+		@owner_login_name=N'sa', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [step1:defragmentation]    Script Date: 3/4/2014 10:55:14 AM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'step1:defragmentation', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=3, 
+		@on_success_step_id=0, 
+		@on_fail_action=4, 
+		@on_fail_step_id=2, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'/* Query developed by Vimal Lohani For reorganizing and rebuilding indexes */
+/* Query work for all Online Databases in one go */
+/* Work for index name available other wise will say INDEX NAME NOT SET OR NULL */
+/* Work for user define indexes */
+/* Still work if any error occored with indexes */
+
+
+USE MASTER
+GO
+
+SET NOCOUNT ON
+If exists (select * from tempdb.sys.all_objects where name like ''#Databases'') 
+								begin	drop table #Databases end
+ SELECT ROW_NUMBER() OVER(ORDER BY name) Seq, name Banco
+INTO #Databases
+FROM sys.databases
+WHERE name NOT IN (''master'', ''model'', ''msdb'', ''tempdb'')  --Not including system databases
+         and name NOT LIKE ''ReportServer%''
+AND compatibility_level > 80           --For Database sql 2005 or higher
+AND state=0                 --fOR All online databases
+ORDER BY Banco;
+
+DECLARE
+    @Loop INT = 1,
+	@Qt INT = (SELECT COUNT(1) FROM #Databases),                --max no of databases
+	@Banco VARCHAR(50);
+
+	WHILE @Loop <= @Qt
+	 BEGIN
+	  SET @Banco = (SELECT Banco FROM #Databases WHERE Seq = @Loop);
+		EXEC( 
+		''USE '' + @Banco + ''; '' +
+		''PRINT ''''For Database : '''' + db_name();
+		Declare @dbid int;
+		set @dbid=DB_ID();
+			SELECT
+			ROW_NUMBER() OVER(ORDER BY p.object_id, p.index_id) Seq,
+   			t.name Tabela, h.name Esquema,
+			i.name Indice, p.avg_fragmentation_in_percent Frag
+		INTO #Consulta
+		FROM
+		sys.dm_db_index_physical_stats(@dbid,null,null,null,null) p
+		join sys.indexes i on (p.object_id = i.object_id and p.index_id = i.index_id)
+		join sys.tables t on (p.object_id = t.object_id)
+		join sys.schemas h on (t.schema_id = h.schema_id)
+		join sys.objects o on (o.object_id=p.object_id)
+		where p.avg_fragmentation_in_percent > 5.0
+		and p.index_id >= 0                                    --all indexes including heap
+		and p.page_count >= 10
+		AND o.type=''''U''''                                  
+		ORDER BY Esquema, Tabela;
+		DECLARE
+			@Loop INT = 1,
+			@Total INT = (SELECT COUNT(1) FROM #Consulta),
+			@Comando VARCHAR(500),
+			@Updato VARCHAR(500)
+		WHILE @Loop <= @Total
+			BEGIN
+				SELECT @Comando = ''''ALTER INDEX '''' + Indice +
+					'''' ON '''' + Esquema + ''''.'''' + Tabela +
+					( CASE WHEN Frag > 45.0 THEN '''' REBUILD'''' ELSE '''' REORGANIZE'''' END)
+					FROM #Consulta
+					WHERE Seq = @Loop;
+				EXEC(@Comando);
+				PRINT ''''Executed: '''' + ISNULL(@Comando,''''INDEX NAME NOT SET OR NULL'''');
+				SELECT @Updato=''''UPDATE STATISTICS ''''+ Esquema + ''''.'''' +Tabela + '''' ''''+Indice FROM #Consulta
+					WHERE Seq = @Loop;
+				EXEC(@Updato);
+				PRINT ''''UPDATE STATISTICS: ''''+ ISNULL(@Updato,''''INDEX NAME NOT SET OR NULL'''');
+				SET @Loop = @Loop + 1;
+			END;
+		PRINT DB_NAME() + '''' Total No of indexes defragmented : '''' + CONVERT(VARCHAR(5),@Total);
+		PRINT ''''------------------------------------------------------------------------------'''';
+		DROP TABLE #Consulta;'');  
+	  SET @Loop = @Loop + 1;
+	 END;
+
+DROP TABLE #Databases;
+', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [step2: update statistics]    Script Date: 3/4/2014 10:55:14 AM ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'step2: update statistics', 
+		@step_id=2, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=1, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'
+DECLARE @SQL VARCHAR(1000) 
+DECLARE @DB sysname 
+
+DECLARE curDB CURSOR FORWARD_ONLY STATIC FOR 
+   SELECT [name] 
+   FROM master..sysdatabases
+   WHERE [name] NOT IN (''model'', ''tempdb'')
+   ORDER BY [name]
+    
+OPEN curDB 
+FETCH NEXT FROM curDB INTO @DB 
+WHILE @@FETCH_STATUS = 0 
+   BEGIN 
+       SELECT @SQL = ''USE ['' + @DB +'']'' + CHAR(13) + ''EXEC sp_updatestats'' + CHAR(13) 
+       PRINT @SQL 
+	   exec(@sql)
+	   Select @SQL= ''USE ['' + @DB +'']'' + CHAR(13) + ''alter database ['' + @DB +'']'' +'' set multi_user''+ CHAR(13)
+       PRINT @SQL
+	   exec(@SQL)
+	   print ''------------------------------------------------''
+	   FETCH NEXT FROM curDB INTO @DB 
+   END 
+   
+CLOSE curDB 
+DEALLOCATE curDB
+
+
+CLOSE curDB 
+DEALLOCATE curDB', 
+		@database_name=N'master', 
+		@flags=0
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
