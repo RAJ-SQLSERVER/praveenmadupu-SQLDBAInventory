@@ -1,0 +1,990 @@
+--SQL Agent job to show SQL Server service details upon agent restart
+ --############################################################################################################################
+--
+ --This script is being offered for public use and as such is being offered as untested and unverified.
+ --Please use this script at your own risk, as I take NO responsibility for it's use elsewhere in environments 
+ --that are NOT under my control. 
+ --Redistribution or sale of the code, in whole or in part, is prohibited! 
+ 
+ --Always ensure that you run such scripts in test prior to production and perform due diligence as to whether they meet yours, 
+ --or your company needs!
+--
+--############################################################################################################################
+--
+-- Author:			Haden Kingsland
+--
+-- Date:			8th July 2011
+--
+-- Description :	To show sql and physical server details upon instance restart
+--					so that we have visibility of unexpected issues with servers and
+--					services.
+--					The Windows uptime.exe executable MUST be installed in the 
+--					Windows\System32 area of the O/S for this to work, and 
+--					xp_cmdshell must be configured for this to be run!
+--
+--					The calling SQL Agent job Schedule Type must be set to ...
+--					"Start automatically when SQL Server Agent starts" so that 
+--					the job runs upon instance startup.
+--
+--					This script is invoked by the following named SQL Agent job 
+--					in all instances ...
+--					"Report Server/Service Status upon system restart"
+--
+--					This procedure uses the following extended stored procedures ...
+--
+--					xp_servicecontrol (undocumented procedure -- Use with care!!)
+--					xp_regread
+--					xp_cmdshell
+--
+--#######################################################################################################
+
+USE [msdb]
+GO
+
+BEGIN TRANSACTION
+DECLARE @ReturnCode INT
+SELECT @ReturnCode = 0
+
+IF NOT EXISTS (SELECT name FROM msdb.dbo.syscategories WHERE name=N'Database Maintenance' AND category_class=1)
+BEGIN
+EXEC @ReturnCode = msdb.dbo.sp_add_category @class=N'JOB', @type=N'LOCAL', @name=N'Database Maintenance'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+
+END
+
+DECLARE @jobId BINARY(16)
+EXEC @ReturnCode =  msdb.dbo.sp_add_job @job_name=N'SQLServer Agent Restarted', 
+		@enabled=1, 
+		@notify_level_eventlog=0, 
+		@notify_level_email=2, 
+		@notify_level_netsend=0, 
+		@notify_level_page=0, 
+		@delete_level=0, 
+		@description=N'To show sql and physical server details upon instance restart
+so that we have visibility of unexpected issues with servers and
+services.', 
+		@category_name=N'Database Maintenance', 
+		@owner_login_name=N'sa', 
+		@notify_email_operator_name=N'Haden Kingsland', @job_id = @jobId OUTPUT
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+/****** Object:  Step [To report all system statuses and send email upon agent restart]    Script Date: 09/28/2011 11:43:57 ******/
+EXEC @ReturnCode = msdb.dbo.sp_add_jobstep @job_id=@jobId, @step_name=N'To report all system statuses and send email upon agent restart', 
+		@step_id=1, 
+		@cmdexec_success_code=0, 
+		@on_success_action=1, 
+		@on_success_step_id=0, 
+		@on_fail_action=2, 
+		@on_fail_step_id=0, 
+		@retry_attempts=0, 
+		@retry_interval=0, 
+		@os_run_priority=0, @subsystem=N'TSQL', 
+		@command=N'
+BEGIN
+
+DECLARE		@MailProfileName VARCHAR(50),		
+			@ERR_MESSAGE varchar(200),
+			@ERR_NUM int,
+			@MESSAGE_BODY varchar(2000),
+			@MESSAGE_BODY2 varchar(1000),
+			@p_error_description varchar(300),
+			@job_name varchar(80),
+			@NewLine CHAR(2),
+			@Q CHAR(1),
+			@tableHTML VARCHAR(MAX),
+			@tableHTML1 VARCHAR(MAX),
+			@tableHTML2 VARCHAR(MAX),
+			@lineHTML VARCHAR(MAX),
+			@lineHTML1 VARCHAR(MAX),
+			@lineHTML2 VARCHAR(MAX),
+			@start_table VARCHAR(MAX),
+			@start_table1 VARCHAR(MAX),
+			@start_table2 VARCHAR(MAX),
+			@TR varchar(20),
+			@END	 varchar(30),
+			@END_TABLE varchar(30),
+			@ENDTAB varchar(20),
+			@recipient_list	varchar(1000),
+			@email varchar(100),
+			@value varchar(30),
+			@mailsubject varchar(200),
+			@propertyid int,
+			@userid bigint, 
+			@property_value varchar(1000),
+			@output VARCHAR(1000),
+			@ChkInstanceName nvarchar(128), /*Stores SQL Instance Name*/
+			@ChkSrvName nvarchar(128), /*Stores Server Name*/
+			@TrueSrvName nvarchar(128), /*Stores instance name of MSSQLSERVER for default instances*/
+			@SQLSrv NVARCHAR(128), /*Stores server name*/
+			@PhysicalSrvName NVARCHAR(128), /*Stores physical name*/
+			@FTS nvarchar(128), /*Stores Full Text Search Service name*/
+			@RS nvarchar(128), /*Stores Reporting Service name*/
+			@SQLAgent NVARCHAR(128), /*Stores SQL Agent Service name*/
+			@OLAP nvarchar(128), /*Stores Analysis Service name*/
+			@REGKEY NVARCHAR(128), /*Stores Registry Key information*/
+			@PhysicalSrverName VARCHAR(128),
+			@ServerName VARCHAR(128),
+			@ServiceName VARCHAR(128),
+			@ServiceStatus VARCHAR(128),
+			@StatusDateTime DATETIME,
+			@XPCMDSH_ORIG_ON varchar(1),
+			@failsafe VARCHAR(100);
+
+SET @NewLine = CHAR(13) + CHAR(10) 
+SET @Q = CHAR(39) 
+
+-- initialize variables (otherwise concat fails because the variable value is NULL)
+set @lineHTML = '''' 
+set @lineHTML1 = ''''
+set @lineHTML2 = '''' 
+set @tableHTML = ''''
+set @tableHTML1 = ''''
+set @tableHTML2 = ''''
+set @start_table = ''''
+set @start_table1 = ''''
+set @start_table2 = ''''
+SET @output = ''''
+set @XPCMDSH_ORIG_ON = ''''
+
+SET @tableHTML =
+		''<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Frameset// EN">'' +
+		''<html>'' +
+		''<LANG="EN">'' +
+		''<head>'' +
+		''<TITLE>SQL and Windows Server Status</TITLE>'' +
+		''</head>'' +
+		''<body>''
+		
+set @start_table = ''<font color="black" face="Tahoma" >'' + 
+	''<CENTER>'' + 
+	''<H1>Server Status</H1>'' +
+	''<table border="1">'' +
+	''<tr BGCOLOR="orange">'' + 
+	-- list all table headers here
+	''<th BGCOLOR="#FFCC99" width="100%" colspan="3">SQL and Windows Server Status</th>''+''</tr>'' + 
+	''<tr>'' + 
+	''<th BGCOLOR="#FFCC99">Uptime Status</th>'' +
+	''</tr>''
+	
+--set @start_table1 =	''<font color="green" face="Tahoma" >'' + 
+--	''<H1>Checking users that have been switched to new LB ...</H1>'' +
+--	''<table border="1">'' +
+--	''<tr BGCOLOR="green">'' + 
+--	-- list all table headers here
+--	''<th width="100%" colspan="2">Usernames switched after the delete</th>'' +''</tr>'' + 
+--	''<tr>'' + 
+--	''<th>Email</th>'' + 
+--	''<th>Value</th>'' +
+--	''</tr>''
+
+set @start_table2 = ''<font color="black" face="Tahoma" >'' + 
+	''<H1>Full SQL Server Install Details</H1>'' +
+	''<table border="1">'' +
+	''<tr BGCOLOR="#3399FF">'' + 
+	-- list all table headers here
+	''<th BGCOLOR="#99CCFF" width="100%" colspan="5">SQL Component Details</th>'' +''</tr>'' + 
+	''<tr>'' + 
+	''<th BGCOLOR="#99CCFF">Physical Server Name</th>'' + 
+	''<th BGCOLOR="#99CCFF">SQL Instance Name</th>'' +
+	''<th BGCOLOR="#99CCFF">SQL Server Services</th>'' + 
+	''<th BGCOLOR="#99CCFF">Current Service Status</th>'' +
+	''<th BGCOLOR="#99CCFF">Date/Time of Status Checked</th>'' +
+	''</tr>''
+
+SET @TR = ''</tr>''
+SET @ENDTAB = ''</table></font>''
+--SET @END = ''</table></font></body></html>''
+SET @END_TABLE = ''</table></font>''
+SET @END = ''</body></html>''
+SET @mailsubject   = ''The SQL Agent for .. '' + @@SERVERNAME + '' has been restarted at ... '' + CONVERT(VARCHAR(16),GETDATE(),121) 
++ ''. If this is scheduled, please ignore this email, otherwise, check the SQL Server & Event Logs for details!''
+
+--------------------------------------------------------------------------------------------------------------------
+-- Check whether xp_cmdshell is turned off via Surface Area Configuration (2005) / Instance Facets (2008)
+-- This is best practice !!!!! If it is already turned on, LEAVE it on !!
+
+-- turn on advanced options
+	EXEC sp_configure ''show advanced options'', 1 reconfigure 
+	RECONFIGURE  
+
+	CREATE TABLE #advance_opt (name VARCHAR(20),min int, max int, conf int, run int)
+			INSERT #advance_opt
+		EXEC sp_configure ''xp_cmdshell'' -- this will show whether it is turned on or not
+				
+	IF (select conf from #advance_opt) = 0 -- check if xp_cmdshell is turned on or off, if off, then turn it on
+		BEGIN
+
+			set @XPCMDSH_ORIG_ON = ''N'' -- make a note that it is NOT supposed to be on all the time
+			
+			--turn on xp_cmdshell to allow operating system commands to be run
+			EXEC sp_configure ''xp_cmdshell'', 1 reconfigure
+			RECONFIGURE
+		END
+	ELSE
+		BEGIN
+		 -- make a note that xp_cmdshell was already turned on, so not to turn it off later by mistake
+			set @XPCMDSH_ORIG_ON = ''Y''
+		END
+
+-- drop the temporary table to tidy up after ourselves.
+
+	IF EXISTS (
+	select * from tempdb.sys.objects
+	where name like ''%advance_opt%''
+	)
+		BEGIN
+			drop table #advance_opt
+		END
+		
+--------------------------------------------------------------------------------------------------------------------
+--
+--create temporary server uptime table
+--
+
+CREATE TABLE #tbl_uptime
+    (
+      id INT IDENTITY(1, 1) ,
+      out_put VARCHAR(MAX)
+    )
+
+SET NOCOUNT ON
+DECLARE @crdate DATETIME ,
+    @hr VARCHAR(50) ,
+    @min VARCHAR(5)
+
+SELECT  @crdate = crdate
+FROM    sys.sysdatabases
+WHERE   name = ''tempdb''
+
+SELECT  @hr = ( DATEDIFF(mi, @crdate, GETDATE()) ) / 60
+
+IF ( ( DATEDIFF(mi, @crdate, GETDATE()) ) / 60 ) = 0 
+    SELECT  @min = ( DATEDIFF(mi, @crdate, GETDATE()) )
+ELSE 
+    SELECT  @min = ( DATEDIFF(mi, @crdate, GETDATE()) ) - 
+    ( ( DATEDIFF(mi,
+    @crdate,
+    GETDATE()) ) / 60 ) * 60
+
+--       
+-- show how long the physical server has been up using the results from the "uptime" utility
+--
+
+--INSERT  INTO #tbl_uptime
+--        ( out_put 
+--        )
+--VALUES  ( ''SQL Server "'' + CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME''))
+--          + ''" has been online for the past '' + @hr + '' hours & '' + @min
+--          + '' minutes''  -- out_put - varchar(max)
+          
+--        )
+
+-- check to see if the SQL Agent is running
+
+--IF NOT EXISTS ( SELECT  1
+--                FROM    master.dbo.sysprocesses
+--                WHERE   program_name = N''SQLAgent - Generic Refresher'' ) 
+--    BEGIN
+--       INSERT  INTO #tbl_uptime
+--                ( out_put 
+--                )
+--        VALUES  ( ''The SQL Server Engine is running but the SQL Server Agent <<IS NOT>> running on ''
+--                  + CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME''))
+--             )
+      
+--    END
+--ELSE 
+--    BEGIN
+      --INSERT  INTO #tbl_uptime
+      --          ( out_put 
+      --          )
+      --  VALUES  ( ''SQL Server and SQL Server Agent both are running for ... ''
+      --            + CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME''))
+      --          )   
+    --END
+
+	IF SERVERPROPERTY(''ISCLUSTERED'') = 1
+	BEGIN
+	
+		INSERT  INTO #tbl_uptime
+        ( out_put 
+        )
+		VALUES  ( ''SQL Server '' --+ CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME'')) 
+          + '' has been online for the past '' + @hr + '' hours & '' + @min
+          + '' minutes for cluster "'' + CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME'')) + ''"''  -- out_put - varchar(max)
+          
+        )
+	
+      INSERT  INTO #tbl_uptime
+                ( out_put 
+                )
+        VALUES  ( ''SQL Server is currently running on the following Cluster node ...''
+                  + CONVERT(VARCHAR(30), SERVERPROPERTY(''ComputerNamePhysicalNetBIOS''))
+                ) 
+                
+        --INSERT  INTO #tbl_uptime
+        --        ( out_put 
+        --        )
+        --VALUES  ( ''Both SQL Server & SQL Server Agent are running on the cluster ... ''
+        --          + CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME''))
+        --        )         
+	END
+	ELSE
+	BEGIN
+	
+	    --INSERT  INTO #tbl_uptime
+     --           ( out_put 
+     --           )
+     --   VALUES  ( ''Both SQL Server & SQL Server Agent are running on ... ''
+     --             + CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME''))
+     --           )   
+                
+        INSERT  INTO #tbl_uptime
+        ( out_put 
+        )
+		VALUES  ( ''SQL Server '' --+ CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME'')) 
+          + '' has been online for the past '' + @hr + '' hours & '' + @min
+          + '' minutes for server "'' + CONVERT(VARCHAR(30), SERVERPROPERTY(''SERVERNAME'')) + ''"''  -- out_put - varchar(max)
+          
+        )
+                
+	
+	END
+
+					--SELECT SERVERPROPERTY(''ComputerNamePhysicalNetBIOS'')
+					--SELECT SERVERPROPERTY(''SERVERNAME'')
+					--SELECT SERVERPROPERTY(''MACHINENAME'')
+					--SELECT SERVERPROPERTY(''ISCLUSTERED'')
+
+ --execute the uptime.exe file pointing it at various servers
+INSERT  #tbl_uptime
+        EXEC master..xp_cmdshell ''uptime''
+	
+--SELECT  *
+--FROM    #tbl_uptime
+--WHERE   out_put IS NOT NULL
+	
+	SELECT @MailProfileName = name
+	FROM msdb.dbo.sysmail_profile WITH (NOLOCK)
+
+PRINT @MailProfileName
+
+	BEGIN TRY
+
+	  DECLARE build_report CURSOR
+	  FOR
+		SELECT  out_put
+		FROM    #tbl_uptime
+		WHERE   out_put IS NOT NULL
+
+		-- Open the cursor.
+		OPEN build_report;
+
+		-- Loop through the update_stats cursor.
+
+		FETCH NEXT
+		   FROM build_report
+		   INTO  @output
+
+		--WHILE @@FETCH_STATUS = 0
+		--BEGIN
+
+		PRINT ''Fetch Status is ... '' + CONVERT(VARCHAR(10),@@FETCH_STATUS)
+
+		WHILE @@FETCH_STATUS <> -1 -- Stop when the FETCH statement failed or the row is beyond the result set
+		BEGIN
+
+			IF @@FETCH_STATUS = 0 -- to ignore -2 status "The row fetched is missing"
+			BEGIN
+
+				set @lineHTML = @lineHTML + 
+								''<tr>'' + 
+								''<td>'' + cast(@output as varchar(400)) + ''</td>''
+								--''<td>'' + '' '' + cast(@userid as nvarchar(30))  + ''</td>'' +
+								--''<td>'' + '' '' + cast(@property_value as nvarchar(30))  + ''</td>'' 
+								+ ''</tr>''
+
+				print @lineHTML
+
+			END
+		
+			FETCH NEXT
+				   FROM build_report
+				   INTO  @output	
+		
+		END
+
+		-- Close and deallocate the cursor.
+
+		CLOSE build_report;
+		DEALLOCATE build_report;
+
+-- get all installed features, status and time checked here ...
+-- Derived from here ... 
+-- http://pawansingh1431.blogspot.com/2011/02/check-what-are-sql-components-installed.html
+
+CREATE TABLE #RegResult
+(
+ResultValue NVARCHAR(4)
+)
+CREATE TABLE #ServicesServiceStatus /*Create temp tables*/
+(
+RowID INT IDENTITY(1,1)
+,ServerName VARCHAR(60)
+,ServiceName VARCHAR(60)
+,ServiceStatus varchar(60)
+,StatusDateTime DATETIME DEFAULT (GETDATE())
+,PhysicalSrverName VARCHAR(60)
+)
+
+IF SERVERPROPERTY(''IsClustered'') = 1
+BEGIN
+	SET @PhysicalSrvName = CAST(SERVERPROPERTY(''ComputerNamePhysicalNetBIOS'') AS VARCHAR(128))
+END
+ELSE
+BEGIN
+	SET @PhysicalSrvName = CAST(SERVERPROPERTY(''MachineName'') AS VARCHAR(128))
+END
+
+
+SET @ChkSrvName =  CAST(SERVERPROPERTY(''INSTANCENAME'') AS VARCHAR(128))
+SET @ChkInstanceName = @@serverName
+IF @ChkSrvName IS NULL /*Detect default or named instance*/ 
+    BEGIN
+        SET @TrueSrvName = ''MSSQLSERVER (DEFAULT)''
+        SELECT  @OLAP = ''MSSQLServerOLAPService'' /*Setting up proper service name*/
+        SELECT  @FTS = ''MSFTESQL''
+        SELECT  @RS = ''ReportServer''
+        SELECT  @SQLAgent = ''SQLSERVERAGENT''
+        SELECT  @SQLSrv = ''MSSQLSERVER''
+    END
+ELSE 
+    BEGIN
+        SET @TrueSrvName = CAST(SERVERPROPERTY(''INSTANCENAME'') AS VARCHAR(128))
+        SET @SQLSrv = ''$'' + @ChkSrvName
+        SELECT  @OLAP = ''MSOLAP'' + @SQLSrv /*Setting up proper service name*/
+        SELECT  @FTS = ''MSFTESQL'' + @SQLSrv
+        SELECT  @RS = ''ReportServer'' + @SQLSrv
+        SELECT  @SQLAgent = ''SQLAgent'' + @SQLSrv
+        SELECT  @SQLSrv = ''MSSQL'' + @SQLSrv
+    END
+/* ---------------------------------- SQL Server Service Section ----------------------------------------------*/
+SET @REGKEY = ''System\CurrentControlSet\Services\'' + @SQLSrv
+INSERT  #RegResult
+        ( ResultValue 
+        )
+        EXEC master.sys.xp_regread @rootkey = ''HKEY_LOCAL_MACHINE'',
+            @key = @REGKEY
+IF ( SELECT ResultValue
+     FROM   #RegResult
+   ) = 1 
+    BEGIN
+        INSERT  #ServicesServiceStatus
+                ( ServiceStatus
+                ) /*Detecting status of SQL Sever service*/
+                EXEC xp_servicecontrol N''QUERYSTATE'', @SQLSrv
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''MS SQL Server Service''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+ELSE 
+    BEGIN
+        INSERT  INTO #ServicesServiceStatus
+                ( ServiceStatus )
+        VALUES  ( ''NOT INSTALLED'' )
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''MS SQL Server Service''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+/* ---------------------------------- SQL Server Agent Service Section -----------------------------------------*/
+SET @REGKEY = ''System\CurrentControlSet\Services\'' + @SQLAgent
+INSERT  #RegResult
+        ( ResultValue 
+        )
+        EXEC master.sys.xp_regread @rootkey = ''HKEY_LOCAL_MACHINE'',
+            @key = @REGKEY
+IF ( SELECT ResultValue
+     FROM   #RegResult
+   ) = 1 
+    BEGIN
+        INSERT  #ServicesServiceStatus
+                ( ServiceStatus
+                ) /*Detecting status of SQL Agent service*/
+                EXEC xp_servicecontrol N''QUERYSTATE'', @SQLAgent
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''SQL Server Agent Service''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @SQLAgent
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+ELSE 
+    BEGIN
+        INSERT  INTO #ServicesServiceStatus
+                ( ServiceStatus )
+        VALUES  ( ''NOT INSTALLED'' )
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''SQL Server Agent Service''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @SQLAgent
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+/* ---------------------------------- SQL Browser Service Section ----------------------------------------------*/
+SET @REGKEY = ''System\CurrentControlSet\Services\SQLBrowser''
+INSERT  #RegResult
+        ( ResultValue 
+        )
+        EXEC master.sys.xp_regread @rootkey = ''HKEY_LOCAL_MACHINE'',
+            @key = @REGKEY
+IF ( SELECT ResultValue
+     FROM   #RegResult
+   ) = 1 
+    BEGIN
+        INSERT  #ServicesServiceStatus
+                ( ServiceStatus
+                ) /*Detecting status of SQL Browser Service*/
+                EXEC master.dbo.xp_servicecontrol N''QUERYSTATE'', N''sqlbrowser''
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''SQL Browser Service - Instance Independent''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+ELSE 
+    BEGIN
+        INSERT  INTO #ServicesServiceStatus
+                ( ServiceStatus )
+        VALUES  ( ''NOT INSTALLED'' )
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''SQL Browser Service - Instance Independent''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+/* ---------------------------------- Integration Service Section ----------------------------------------------*/
+SET @REGKEY = ''System\CurrentControlSet\Services\MsDtsServer''
+INSERT  #RegResult
+        ( ResultValue 
+        )
+        EXEC master.sys.xp_regread @rootkey = ''HKEY_LOCAL_MACHINE'',
+            @key = @REGKEY
+IF ( SELECT ResultValue
+     FROM   #RegResult
+   ) = 1 
+    BEGIN
+        INSERT  #ServicesServiceStatus
+                ( ServiceStatus
+                ) /*Detecting status of Intergration Service*/
+                EXEC master.dbo.xp_servicecontrol N''QUERYSTATE'',
+                    N''MsDtsServer''
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''Intergration Service - Instance Independent''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+ELSE 
+    BEGIN
+        INSERT  INTO #ServicesServiceStatus
+                ( ServiceStatus )
+        VALUES  ( ''NOT INSTALLED'' )
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''Intergration Service - Instance Independent''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+/* ---------------------------------- Reporting Service Section ------------------------------------------------*/
+SET @REGKEY = ''System\CurrentControlSet\Services\'' + @RS
+INSERT  #RegResult
+        ( ResultValue 
+        )
+        EXEC master.sys.xp_regread @rootkey = ''HKEY_LOCAL_MACHINE'',
+            @key = @REGKEY
+IF ( SELECT ResultValue
+     FROM   #RegResult
+   ) = 1 
+    BEGIN
+        INSERT  #ServicesServiceStatus
+                ( ServiceStatus
+                ) /*Detecting status of Reporting service*/
+                EXEC master.dbo.xp_servicecontrol N''QUERYSTATE'', @RS
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''Reporting Service''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+ELSE 
+    BEGIN
+        INSERT  INTO #ServicesServiceStatus
+                ( ServiceStatus )
+        VALUES  ( ''NOT INSTALLED'' )
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''Reporting Service''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+/* ---------------------------------- Analysis Service Section -------------------------------------------------*/
+IF @ChkSrvName IS NULL /*Detect default or named instance*/ 
+    BEGIN
+        SET @OLAP = ''MSSQLServerOLAPService''
+    END
+ELSE 
+    BEGIN
+        SET @OLAP = ''MSOLAP'' + ''$'' + @ChkSrvName
+        SET @REGKEY = ''System\CurrentControlSet\Services\'' + @OLAP
+    END
+INSERT  #RegResult
+        ( ResultValue 
+        )
+        EXEC master.sys.xp_regread @rootkey = ''HKEY_LOCAL_MACHINE'',
+            @key = @REGKEY
+IF ( SELECT ResultValue
+     FROM   #RegResult
+   ) = 1 
+    BEGIN
+        INSERT  #ServicesServiceStatus
+                ( ServiceStatus
+                ) /*Detecting status of Analysis service*/
+                EXEC master.dbo.xp_servicecontrol N''QUERYSTATE'', @OLAP
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''Analysis Services''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+ELSE 
+    BEGIN
+        INSERT  INTO #ServicesServiceStatus
+                ( ServiceStatus )
+        VALUES  ( ''NOT INSTALLED'' )
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''Analysis Services''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+/* ---------------------------------- Full Text Search Service Section -----------------------------------------*/
+SET @REGKEY = ''System\CurrentControlSet\Services\'' + @FTS
+INSERT  #RegResult
+        ( ResultValue 
+        )
+        EXEC master.sys.xp_regread @rootkey = ''HKEY_LOCAL_MACHINE'',
+            @key = @REGKEY
+IF ( SELECT ResultValue
+     FROM   #RegResult
+   ) = 1 
+    BEGIN
+        INSERT  #ServicesServiceStatus
+                ( ServiceStatus
+                ) /*Detecting status of Full Text Search service*/
+                EXEC master.dbo.xp_servicecontrol N''QUERYSTATE'', @FTS
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''Full Text Search Service''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+ELSE 
+    BEGIN
+        INSERT  INTO #ServicesServiceStatus
+                ( ServiceStatus )
+        VALUES  ( ''NOT INSTALLED'' )
+        UPDATE  #ServicesServiceStatus
+        SET     ServiceName = ''Full Text Search Service''
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     ServerName = @TrueSrvName
+        WHERE   RowID = @@identity
+        UPDATE  #ServicesServiceStatus
+        SET     PhysicalSrverName = @PhysicalSrvName
+        WHERE   RowID = @@identity
+        TRUNCATE TABLE #RegResult
+    END
+    
+/* ---------------------------------- End of Server Component Checks -----------------------------------------*/
+--
+-- Uncomment this section to use for debug purposes if you are getting no date
+--
+	   --SELECT   PhysicalSrverName ,
+				--ServerName ,
+				--ServiceName ,
+				--ServiceStatus ,
+				--StatusDateTime
+	   --FROM     #ServicesServiceStatus
+
+--
+-- Declare the cursor to read the results from the above Server Component Checks and format
+-- them for HTML.
+--
+
+	  DECLARE installed_features CURSOR
+	  FOR
+	   SELECT   PhysicalSrverName ,
+				ServerName ,
+				ServiceName ,
+				ServiceStatus ,
+				StatusDateTime
+	   FROM     #ServicesServiceStatus
+	  
+-- Open the cursor.
+		OPEN installed_features;
+
+		-- Loop through the update_stats cursor.
+
+		FETCH NEXT
+		   FROM installed_features
+		   INTO @PhysicalSrverName ,
+				@ServerName ,
+				@ServiceName ,
+				@ServiceStatus ,
+				@StatusDateTime
+
+		--WHILE @@FETCH_STATUS = 0
+		--BEGIN
+
+		PRINT ''Fetch Status is ... '' + CONVERT(VARCHAR(10),@@FETCH_STATUS)
+
+		WHILE @@FETCH_STATUS <> -1 -- Stop when the FETCH statement failed or the row is beyond the result set
+		BEGIN
+
+			IF @@FETCH_STATUS = 0 -- to ignore -2 status "The row fetched is missing"
+			BEGIN
+
+				set @lineHTML2 = @lineHTML2 + 
+								''<tr>'' + 
+								''<td>'' + cast(RTRIM(LTRIM(@PhysicalSrverName)) as varchar(60)) + ''</td>'' +
+								''<td>'' + '' '' + cast(@ServerName as nvarchar(50))  + ''</td>'' +
+								''<td>'' + '' '' + cast(@ServiceName as nvarchar(50))  + ''</td>'' +
+								''<td>'' + '' '' + cast(@ServiceStatus as nvarchar(30))  + ''</td>'' +
+								''<td>'' + '' '' + convert(VARCHAR(16),@StatusDateTime,121)  + ''</td>'' 
+								+ ''</tr>''
+
+				print @lineHTML2
+
+			END
+		
+		   FETCH NEXT
+				   FROM installed_features
+				   INTO @PhysicalSrverName, @ServerName, @ServiceName,
+			@ServiceStatus, @StatusDateTime
+				   		
+		END
+
+		-- Close and deallocate the cursor.
+
+		CLOSE installed_features;
+		DEALLOCATE installed_features;
+
+		-- ###############################################
+		-- build up HTML statement
+
+		set @tableHTML = @tableHTML + @start_table + @lineHTML + @END_TABLE + 
+		@start_table2 + @lineHTML2 + @END_TABLE + @END
+
+		-- as the <td> tags are auto-generated, I need to replace then with a new <td>
+		-- tag including all the required formatting.
+
+		set @tableHTML = REPLACE( @tableHTML, ''<td>'', ''<td BGCOLOR=#CCCCFF>'' );
+		
+		print @tableHTML
+
+		-- FOR DEBUG PURPOSES! UNCOMMENT IF NEEDED
+		-- 
+		--DECLARE @failsafe VARCHAR(100)
+		--DECLARE @recipient_list VARCHAR(100)
+		
+		SELECT @recipient_list = email_address
+		FROM msdb..sysoperators
+		WHERE name = ''LOR_SQL_Admin_Alerts'' -- Name of main required operator
+		
+		IF @recipient_list IS NULL
+		BEGIN
+					
+			EXECUTE master.dbo.xp_instance_regread N''HKEY_LOCAL_MACHINE'',
+										 N''SOFTWARE\Microsoft\MSSQLServer\SQLServerAgent'',
+										 N''AlertFailSafeOperator'',
+										 @failsafe OUTPUT,
+										 N''no_output''
+
+			SELECT @recipient_list = email_address
+			FROM msdb..sysoperators
+			WHERE name = @failsafe
+			                             
+		END
+		
+		PRINT @recipient_list
+		
+			EXEC msdb.dbo.sp_send_dbmail
+				@profile_name = @MailProfileName,
+				--@recipients = ''hkingsland@laingorourke.com'',
+				@recipients = @recipient_list,
+				@body_format = ''HTML'',
+				@importance = ''HIGH'',
+				@body = @tableHTML,
+				@subject = @mailsubject
+
+	END TRY
+
+	BEGIN CATCH
+	
+			SELECT @ERR_MESSAGE = ERROR_MESSAGE(), @ERR_NUM = ERROR_NUMBER();
+			SET @MESSAGE_BODY=''Error running the ''''Server & Service Status upon system restart'''' script '' 
+			+  ''. Error Code is ... '' + RTRIM(CONVERT(CHAR(10),@ERR_NUM)) + '' Error Message is ... '' + @ERR_MESSAGE
+			SET @MESSAGE_BODY2=''Failure of Report Server & Service Status upon system restart Check script within the '' 
+			+ LTRIM(RTRIM(cast(@@SERVERNAME as VARCHAR(30)))) + '' instance''
+			SET @MESSAGE_BODY = @MESSAGE_BODY -- + @MESSAGE_BODY3
+
+			EXEC msdb.dbo.sp_notify_operator 
+				@profile_name = @MailProfileName, 
+				@name=N''LOR_SQL_Admin_Alerts'',
+				@subject = @MESSAGE_BODY2, 
+				@body= @MESSAGE_BODY
+	
+	-- If for some reason this script fails, check for any temporary
+	-- tables created during the run and drop them for next time.
+	
+       IF EXISTS ( SELECT   *
+                   FROM     tempdb.sys.objects
+                   WHERE    name = ''#tbl_uptime'' ) 
+        BEGIN
+            DROP TABLE #tbl_uptime
+        END
+	
+       IF EXISTS ( SELECT   *
+                   FROM     tempdb.sys.objects
+                   WHERE    name = ''#ServicesServiceStatus'' ) 
+        BEGIN
+            DROP TABLE #ServicesServiceStatus
+        END
+        
+       IF EXISTS ( SELECT   *
+                   FROM     tempdb.sys.objects
+                   WHERE    name = ''#RegResult'' ) 
+        BEGIN
+            DROP TABLE #RegResult
+        END
+	
+	
+	END CATCH
+
+-----------------------------------------------------------------------------------------------------------------------		
+-- turn off advanced options
+
+	IF @XPCMDSH_ORIG_ON = ''N''  -- if xp_cmdshell was NOT originally turned on, then turn it off 
+	BEGIN
+
+		--  turn off xp_cmdshell to dis-allow operating system commands to be run
+		EXEC sp_configure ''xp_cmdshell'', 0  reconfigure
+		RECONFIGURE
+
+		EXEC sp_configure ''show advanced options'', 0 reconfigure
+		RECONFIGURE
+		
+		 
+	END
+-----------------------------------------------------------------------------------------------------------------------
+--
+-- Cleanup after ourselves!!
+--
+	DROP TABLE #tbl_uptime
+	DROP TABLE #ServicesServiceStatus 
+	DROP TABLE #RegResult 
+
+END', 
+		@database_name=N'master', 
+		@flags=4
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_update_job @job_id = @jobId, @start_step_id = 1
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobschedule @job_id=@jobId, @name=N'Report on server status upon system and agent restart', 
+		@enabled=1, 
+		@freq_type=64, 
+		@freq_interval=0, 
+		@freq_subday_type=0, 
+		@freq_subday_interval=0, 
+		@freq_relative_interval=0, 
+		@freq_recurrence_factor=0, 
+		@active_start_date=20110708, 
+		@active_end_date=99991231, 
+		@active_start_time=0, 
+		@active_end_time=235959
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+EXEC @ReturnCode = msdb.dbo.sp_add_jobserver @job_id = @jobId, @server_name = N'(local)'
+IF (@@ERROR <> 0 OR @ReturnCode <> 0) GOTO QuitWithRollback
+COMMIT TRANSACTION
+GOTO EndSave
+QuitWithRollback:
+    IF (@@TRANCOUNT > 0) ROLLBACK TRANSACTION
+EndSave:
+
+GO
