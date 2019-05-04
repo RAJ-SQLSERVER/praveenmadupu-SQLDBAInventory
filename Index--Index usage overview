@@ -1,0 +1,141 @@
+--Index usage overview
+ --#region drop if exists
+if exists (select 1 from INFORMATION_SCHEMA.VIEWS where table_name = 'vw_index_usage' and table_schema='dbo')
+drop view [dbo].[vw_index_usage];
+go
+--#endregion
+
+--#region create view vw_index_usage
+create view [dbo].[vw_index_usage]
+with encryption
+as
+	with CTE(tablename, indexname, indextype, indexusage, fill_factor, filegroupname, MB, cols, included, has_filter, user_hits, user_seeks, user_scans
+			, user_lookups, user_updates, system_reads, system_updates, stats_date, compression_method, SQLCmd)
+	as
+	(
+		select	d.name "tablename"
+				, c.name "indexname"
+				, c.type_desc "indextype"
+				, case c.is_disabled
+					when 1 then '(DISABLED)'
+					else
+						case c.is_unique
+								when 1 then
+									case is_primary_key
+										when 1 then
+											'Primary Key'
+										else
+											'Unique'
+									end
+								else
+									case c.is_unique_constraint
+										when 1 then
+											'Unique Constraint'
+										else
+											case when c.name like 'FK[_]%'
+												then 'Foreign Key'
+											else
+												'Performance'
+											end
+									end
+						end
+					end  "IndexUsage"
+				, c.fill_factor
+				, FILEGROUP_NAME(c.data_space_id) "FileGroupName"
+				, (select ceiling(used/128) from sysindexes b where b.name=c.name and c.index_id = b.indid  and b.[id]=c.[object_id]) "MB"
+				, (select count(*) from sys.index_columns d where c.object_id = d.object_id and c.index_id = d.index_id and d.is_included_column = 0) "cols"
+				, (select count(*) from sys.index_columns d where c.object_id = d.object_id and c.index_id = d.index_id and d.is_included_column = 1) "included"
+				, c.has_filter
+				, (a.user_seeks + a.user_scans + a.user_lookups) "user_hits"
+				, a.user_seeks
+				, a.user_scans
+				, a.user_lookups
+				, a.user_updates
+				, (a.system_seeks + a.system_scans + a.system_lookups) as system_reads
+				, a.system_updates
+				, a.last_system_update "stats_date"
+				, e.data_compression_desc
+				, case
+					when is_unique_constraint = 0 and is_unique = 0 and is_primary_key = 0 and c.type_desc = 'NONCLUSTERED'
+						then 'alter index [' + c.name + '] on [' + object_name(c.object_id) + '] disable;'
+				end "SQLCmd"
+		from    sys.indexes as c
+		left	join sys.dm_db_index_usage_stats a
+		on		a.object_id = c.object_id
+		and		a.index_id = c.index_id
+		and		a.database_id = DB_ID()
+		join	sys.tables d
+		on		c.object_id = d.object_id
+		join	sys.partitions e
+		on		e.object_id = c.object_id
+		and		e.index_id = c.index_id
+		where	c.type > 0						-- exclude HEAPs
+	union
+		select	b.name
+				, b.name
+				, a.type_Desc
+				, NULL
+				, NULL
+				, FILEGROUP_NAME(a.data_space_id)
+				, CEILING(c.used/128)
+				, b.max_column_id_used
+				, NULL
+				, NULL
+				, (d.user_seeks + d.user_scans + d.user_lookups)
+				, d.user_seeks
+				, d.user_scans
+				, d.user_lookups
+				, d.user_updates
+				, (d.system_seeks + d.system_scans + d.system_lookups) as system_reads
+				, d.system_updates
+				, d.last_system_update "stats_date"
+				, e.data_compression_desc
+				, NULL
+		from	sys.indexes a
+		join	sys.tables b
+		on 		a.object_id = b.object_id
+		join 	sysindexes c
+		on 		a.object_id = c.id
+		and 	a.index_id = c.indid
+		left	join sys.dm_db_index_usage_stats d
+		on		d.object_id = a.object_id
+		and		d.index_id = a.index_id
+		and		d.database_id = DB_ID()
+		join	sys.partitions e
+		on		e.object_id = a.object_id
+		and		e.index_id = a.index_id
+		where	d.index_id = 0	
+	)
+	select	tablename
+			, indexname
+			, indextype
+			, indexusage
+			, filegroupname
+			, fill_factor
+			, MB
+			, cols
+			, included
+			, has_filter
+			, round(cast(user_seeks as real) / coalesce(nullif(user_hits,0),1) * 100,0) as "perc_seeks"
+			, round(cast(user_scans as real) / coalesce(nullif(user_hits,0),1) * 100,0) as "perc_scans"
+			, round(cast(user_lookups as real) / coalesce(nullif(user_hits,0),1) * 100,0) as "perc_lookups"
+			, user_hits
+			, user_updates
+			, system_updates
+			, case
+				when user_hits = 0
+					then 0
+				else round(cast(user_seeks + user_scans*.8 + user_lookups*1.2 AS REAL) / cast(coalesce(nullif(user_updates,0),1) as REAL), 4)
+			  end "read_ratio"
+			, case
+				when user_updates = 0
+					then 0
+				else round(cast(user_updates as REAL) / coalesce(nullif(cast(user_seeks + user_scans*.8 + user_lookups*1.2 AS REAL),0),1) , 4)
+			  end "write_ratio"
+			, (user_updates - user_hits) / COALESCE(NULLIF(MB,0),1) as "pressure"
+			, stats_date
+			, compression_method
+			, SQLCmd
+	from	cte
+GO
+--#endregion
