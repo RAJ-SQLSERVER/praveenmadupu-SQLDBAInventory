@@ -1,0 +1,315 @@
+--Script to Restore Entire database from a directory
+--https://www.sqlservercentral.com/scripts/script-to-restore-entire-database-from-a-directory
+===========================================================================================================
+Script gives the autommatted SQL script's on Restore FileListonly, Restore Headeronly and Backup Restore script from the backup drive(ie Gets the restore script for all the available backup files from the specified drive).
+
+Contains two stored procedures,need to create both the stored procedures and run the first procedure to get the restore scripts from the available backup files,
+
+1. USP_DatabaseRestorewithPhysicalPath - Gives the restore script including Headeronly, FileListonly,  and inturn calls Stored procedure "restoreDB" to actual Restore Database script. Need
+
+2. restoreDB - Called from the above stored procedure to produce Restore database script.
+
+Execute Stored procedure with the backup path parameters,
+
+Execute USP_DatabaseRestorewithPhysicalPath 'D:\MSSQL\Backup'
+
+Sample Outputs from the available backup file directory,
+
+--D:\MSSQL\Backup\BACKUPDEMO_DIFF.BAK
+
+RESTORE FILELISTONLY FROM DISK = 'D:\MSSQL\Backup\BACKUPDEMO_DIFF.BAK'
+
+RESTORE HEADERONLY FROM DISK = 'D:\MSSQL\Backup\BACKUPDEMO_DIFF.BAK'
+
+Exec [restoreDB] 'BACKUPDEMO','BACKUPDEMO','D:\MSSQL\Backup\BACKUPDEMO_DIFF.BAK'
+
+GO
+
+----------------------------------------------------------------------------
+
+--D:\MSSQL\Backup\BACKUPDEMO_FULL.BAK
+
+RESTORE FILELISTONLY FROM DISK = 'D:\MSSQL\Backup\BACKUPDEMO_FULL.BAK'
+
+RESTORE HEADERONLY FROM DISK = 'D:\MSSQL\Backup\BACKUPDEMO_FULL.BAK'
+
+Exec [restoreDB] 'BACKUPDEMO','BACKUPDEMO','D:\MSSQL\Backup\BACKUPDEMO_FULL.BAK'
+
+GO
+========================================================================================================================
+USE [master]
+GO
+/****** Object:  StoredProcedure [dbo].[USP_DatabaseRestorewithPhysicalPath]    Script Date: 02/05/2014 08:37:24 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+-- USP_DatabaseRestorewithPhysicalPath 'D:\MSSQL\Backup'
+
+ALTER PROC [dbo].[USP_DatabaseRestorewithPhysicalPath](@folderpath nvarchar(200))
+As
+Begin
+SET NOCOUNT ON;
+/* List the files from the below mentioned path */
+DECLARE @DIR VARCHAR(100)
+DECLARE @dbname nvarchar(200)  
+DECLARE @ID INT
+DECLARE @DB_PATH NVARCHAR(1000)
+DECLARE @FILELISTPATH NVARCHAR(MAX)
+DECLARE @HEADER_LIST NVARCHAR(MAX)
+
+set @dir='dir '+'"'+@folderpath+'"'
+  
+DECLARE @Table table  
+      (  
+            BackupName  nvarchar(128),   
+            BackupDescription  nvarchar(255) ,  
+            BackupType  smallint  ,  
+            ExpirationDate  datetime ,  
+            Compressed  bit  ,  
+            Position  smallint  ,  
+            DeviceType  tinyint  ,  
+            UserName  nvarchar(128) ,  
+            ServerName  nvarchar(128) ,  
+            DatabaseName  nvarchar(128) ,  
+            DatabaseVersion  int  ,  
+            DatabaseCreationDate  datetime ,  
+			BackupSize  numeric(20,0) ,  
+            FirstLSN  numeric(25,0) ,  
+            LastLSN  numeric(25,0) ,  
+            CheckpointLSN  numeric(25,0) ,  
+            DatabaseBackupLSN  numeric(25,0) ,  
+            BackupStartDate  datetime ,  
+            BackupFinishDate  datetime ,  
+            SortOrder  smallint  ,  
+            CodePage  smallint ,  
+            UnicodeLocaleId  int  ,  
+            UnicodeComparisonStyle  int ,  
+            CompatibilityLevel  tinyint ,  
+            SoftwareVendorId  int  ,  
+            SoftwareVersionMajor  int ,  
+            SoftwareVersionMinor  int ,  
+            SoftwareVersionBuild  int ,  
+            MachineName  nvarchar(128) ,  
+            Flags  int  ,  
+            BindingID  uniqueidentifier ,  
+            RecoveryForkID  uniqueidentifier ,  
+            Collation  nvarchar(128) ,  
+            FamilyGUID  uniqueidentifier ,  
+            HasBulkLoggedData  bit  ,  
+            IsSnapshot  bit  ,  
+            IsReadOnly  bit  ,  
+            IsSingleUser  bit  ,  
+            HasBackupChecksums  bit  ,  
+            IsDamaged  bit  ,  
+            BeginsLogChain  bit  ,  
+            HasIncompleteMetaData  bit ,  
+            IsForceOffline  bit  ,  
+            IsCopyOnly  bit  ,  
+            FirstRecoveryForkID  uniqueidentifier ,  
+            ForkPointLSN  numeric(25,0) NULL,  
+            RecoveryModel  nvarchar(60) ,  
+            DifferentialBaseLSN  numeric(25,0) NULL,  
+            DifferentialBaseGUID  uniqueidentifier ,  
+            BackupTypeDescription  nvarchar(60) ,  
+            BackupSetGUID  uniqueidentifier NULL,  
+            CompressedBackupSize  numeric(20,0)  
+      )  
+  
+CREATE TABLE #TMPDIR(ID INT IDENTITY(1,1),FNAME VARCHAR(400))
+
+INSERT #TMPDIR EXECUTE
+MASTER.DBO.XP_CMDSHELL @DIR
+
+DELETE FROM #TMPDIR WHERE ID<6
+
+/* List the files from the above mentioned path */
+/*Produce the the restore script for the backup files - starts here*/
+
+SELECT @folderpath+'\'+SUBSTRING(FNAME,40,100) FNAME INTO ##BKP_FILES FROM #tmpdir
+WHERE fname NOT LIKE '%<DIR>%' and fname not like '%bytes%' and fname is not null
+
+SELECT 'RESTORE FILELISTONLY FROM DISK = '''+@folderpath++'\'+SUBSTRING(FNAME,40,100)+'''' FNAME
+INTO ##FILELISTTBL FROM #tmpdir
+WHERE fname NOT LIKE '%<DIR>%' and fname not like '%bytes%' and fname is not null
+
+SELECT 'RESTORE HEADERONLY FROM DISK = '''+@folderpath++'\'+SUBSTRING(FNAME,40,100)+'''' FNAME
+INTO ##HDR_LIST FROM #tmpdir
+WHERE fname NOT LIKE '%<DIR>%' and fname not like '%bytes%' and fname is not null
+
+/*Produce the the restore script for the backup files - ends here*/
+-------------------------------------------------------------------------------------
+/*script to produce the restore script - starts here*/
+
+ALTER TABLE ##BKP_FILES ADD ID INT IDENTITY
+ALTER TABLE ##FILELISTTBL ADD ID INT IDENTITY
+ALTER TABLE ##HDR_LIST ADD ID INT IDENTITY
+-------------------------------------------------------------------------------------
+DECLARE CUR_SOR CURSOR
+FOR SELECT ID FROM ##BKP_FILES
+
+OPEN CUR_SOR
+FETCH CUR_SOR INTO @ID 
+
+WHILE @@FETCH_STATUS<>-1
+BEGIN
+SELECT @DB_PATH=FNAME  FROM ##BKP_FILES WHERE ID=@ID
+PRINT '--'+@DB_PATH
+SELECT @FILELISTPATH=FNAME FROM ##FILELISTTBL WHERE ID=@ID
+PRINT @FILELISTPATH
+SELECT @HEADER_LIST=FNAME FROM ##HDR_LIST WHERE ID=@ID
+PRINT @HEADER_LIST
+INSERT INTO @Table EXEC(@HEADER_LIST)  
+SELECT @dbname=databasename FROM @Table  
+SELECT @DB_PATH='Exec [restoreDB] '''+@dbname+''','''+@dbname+''','''+@DB_PATH+''''
+PRINT @DB_PATH
+PRINT 'GO'
+PRINT '----------------------------------------------------------------------------'
+FETCH NEXT FROM CUR_SOR INTO @ID
+END
+CLOSE CUR_SOR
+DEALLOCATE CUR_SOR
+
+/*script to produce the restore script - starts here*/
+-------------------------------------------------------------------------------------
+IF EXISTS(SELECT * FROM TEMPDB.SYS.OBJECTS where name='#TMPDIR')
+DROP TABLE #TMPDIR
+IF EXISTS(SELECT * FROM TEMPDB.SYS.OBJECTS where name='##BKP_FILES')
+DROP TABLE ##BKP_FILES
+IF EXISTS(SELECT * FROM TEMPDB.SYS.OBJECTS where name='##FILELISTTBL')
+DROP TABLE ##FILELISTTBL
+IF EXISTS(SELECT * FROM TEMPDB.SYS.OBJECTS where name='##HDR_LIST')
+DROP TABLE ##HDR_LIST
+END
+
+----------------------------------------------------------------------------
+
+USE [master]
+GO
+/****** Object:  StoredProcedure [dbo].[restoreDB]    Script Date: 02/05/2014 08:38:25 ******/
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+--Automatted script to restore the database with the restore filelistonly option.
+
+--http://stackoverflow.com/questions/2510295/fully-automated-sql-server-restore
+
+--RESTORE FILELISTONLY FROM DISK = ‘M:\MSSQL\Backup\FULL\dbaControl.bak'
+
+--RESTORE HEADERONLY FROM DISK = ‘M:\MSSQL\Backup\FULL\dbaControl.bak'
+
+--Exec [restoreDB] 'samplenewdemo1','sampledemo','E:\MSSQL\SAMPLEDEMO.BAK'
+
+ALTER PROC [dbo].[restoreDB]
+    @p_strDBNameTo SYSNAME,
+    @p_strDBNameFrom SYSNAME,
+    @p_strFQNRestoreFileName VARCHAR(255)
+AS 
+    DECLARE 
+        @v_strDBFilename VARCHAR(100),
+        @v_strDBLogFilename VARCHAR(100),
+        @v_strDBDataFile VARCHAR(100),
+        @v_strDBLogFile VARCHAR(100),
+        @v_strExecSQL NVARCHAR(1000),
+        @v_strExecSQL1 NVARCHAR(1000),
+        @v_strMoveSQL NVARCHAR(4000),
+        @v_strREPLACE NVARCHAR(50),
+        @v_strTEMP NVARCHAR(1000),
+        @v_strListSQL NVARCHAR(4000),
+        @v_strServerVersion NVARCHAR(20)
+
+    SET @v_strREPLACE = ''   
+    IF exists (select name from sys.databases where name = @p_strDBNameTo)
+        SET @v_strREPLACE = ', REPLACE'
+
+    SET @v_strListSQL = ''
+    SET @v_strListSQL = @v_strListSQL + 'IF (EXISTS (SELECT * FROM TEMPDB.SYS.TABLES WHERE NAME = ''##FILE_LIST''))'
+    SET @v_strListSQL = @v_strListSQL + 'BEGIN'
+    SET @v_strListSQL = @v_strListSQL + '   DROP TABLE TEMPDB.DBO.##FILE_LIST '
+    SET @v_strListSQL = @v_strListSQL + 'END '
+
+    SET @v_strListSQL = @v_strListSQL + 'CREATE TABLE ##FILE_LIST ('
+    SET @v_strListSQL = @v_strListSQL + '   LogicalName VARCHAR(64),'
+    SET @v_strListSQL = @v_strListSQL + '   PhysicalName VARCHAR(130),'
+    SET @v_strListSQL = @v_strListSQL + '   [Type] VARCHAR(1),'
+    SET @v_strListSQL = @v_strListSQL + '   FileGroupName VARCHAR(64),'
+    SET @v_strListSQL = @v_strListSQL + '   Size DECIMAL(20, 0),'
+    SET @v_strListSQL = @v_strListSQL + '   MaxSize DECIMAL(25,0),'
+    SET @v_strListSQL = @v_strListSQL + '   FileID bigint,'
+    SET @v_strListSQL = @v_strListSQL + '   CreateLSN DECIMAL(25,0),'
+    SET @v_strListSQL = @v_strListSQL + '   DropLSN DECIMAL(25,0),'
+    SET @v_strListSQL = @v_strListSQL + '   UniqueID UNIQUEIDENTIFIER,'
+    SET @v_strListSQL = @v_strListSQL + '   ReadOnlyLSN DECIMAL(25,0),'
+    SET @v_strListSQL = @v_strListSQL + '   ReadWriteLSN DECIMAL(25,0),'
+    SET @v_strListSQL = @v_strListSQL + '   BackupSizeInBytes DECIMAL(25,0),'
+    SET @v_strListSQL = @v_strListSQL + '   SourceBlockSize INT,'
+    SET @v_strListSQL = @v_strListSQL + '   filegroupid INT,'
+    SET @v_strListSQL = @v_strListSQL + '   loggroupguid UNIQUEIDENTIFIER,'
+    SET @v_strListSQL = @v_strListSQL + '   differentialbaseLSN DECIMAL(25,0),'
+    SET @v_strListSQL = @v_strListSQL + '   differentialbaseGUID UNIQUEIDENTIFIER,'
+    SET @v_strListSQL = @v_strListSQL + '   isreadonly BIT,'
+    SET @v_strListSQL = @v_strListSQL + '   ispresent BIT'
+
+    SELECT @v_strServerVersion = CAST(SERVERPROPERTY ('PRODUCTVERSION') AS NVARCHAR)
+
+    IF @v_strServerVersion LIKE '10.%' 
+        BEGIN
+            SET @v_strListSQL = @v_strListSQL + ', TDEThumbpr DECIMAL'
+            --PRINT @v_strServerVersion
+        END
+
+    SET @v_strListSQL = @v_strListSQL + ')'
+
+    EXEC (@v_strListSQL)
+
+
+    INSERT INTO ##FILE_LIST EXEC ('RESTORE FILELISTONLY FROM DISK = ''' + @p_strFQNRestoreFileName + '''')
+
+    DECLARE curFileLIst CURSOR FOR 
+        SELECT 'MOVE N''' + LogicalName + ''' TO N''' + replace(PhysicalName, @p_strDBNameFrom, @p_strDBNameTo) + ''''
+          FROM ##FILE_LIST
+
+    SET @v_strMoveSQL = ''
+
+    OPEN curFileList 
+    FETCH NEXT FROM curFileList into @v_strTEMP
+    WHILE @@Fetch_Status = 0
+    BEGIN
+        SET @v_strMoveSQL = @v_strMoveSQL + @v_strTEMP + ', '
+        FETCH NEXT FROM curFileList into @v_strTEMP
+    END
+
+    CLOSE curFileList
+    DEALLOCATE curFileList
+
+    PRINT 'Killing active connections to the "' + @p_strDBNameTo + '" database'
+
+    -- Create the sql to kill the active database connections
+    SET @v_strExecSQL = ''
+    SELECT   @v_strExecSQL = @v_strExecSQL + 'kill ' + CONVERT(CHAR(10), spid) + ' '
+    FROM     master.dbo.sysprocesses
+    WHERE    DB_NAME(dbid) = @p_strDBNameTo AND DBID <> 0 AND spid <> @@spid
+
+    EXEC (@v_strExecSQL)
+
+    PRINT 'Restoring "' + @p_strDBNameTo + '" database from "' + @p_strFQNRestoreFileName + '" with '
+    PRINT '  data file "' + @v_strDBDataFile + '" located at "' + @v_strDBFilename + '"'
+    PRINT '  log file "' + @v_strDBLogFile + '" located at "' + @v_strDBLogFilename + '"'
+
+    SET @v_strExecSQL = 'RESTORE DATABASE [' + @p_strDBNameTo + ']'
+    SET @v_strExecSQL = @v_strExecSQL + ' FROM DISK = ''' + @p_strFQNRestoreFileName + ''''
+    SET @v_strExecSQL = @v_strExecSQL + ' WITH FILE = 1,'
+    SET @v_strExecSQL = @v_strExecSQL + @v_strMoveSQL
+    SET @v_strExecSQL = @v_strExecSQL + ' NOREWIND, '
+    SET @v_strExecSQL = @v_strExecSQL + ' NOUNLOAD '
+    SET @v_strExecSQL = @v_strExecSQL + @v_strREPLACE
+
+
+    --PRINT '---------------------------'
+    --PRINT @v_strExecSQL
+    --PRINT '---------------------------'
+
+
+    EXEC sp_executesql @v_strExecSQL
