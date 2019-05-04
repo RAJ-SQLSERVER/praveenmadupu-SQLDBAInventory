@@ -1,0 +1,83 @@
+--AlwaysOn Availability Group Read Only Routing Script
+--https://www.sqlservercentral.com/scripts/alwayson-availability-group-read-only-routing-script
+============================================
+If your objective is to use your secondary node(s) as readable secondary’s, read on.
+
+While implementing my availability group into higher environments, after having it working quite easily in development, 
+we ran into a few issues. After a long weekend, and making sure all the appropriate firewall ports were open, 
+to make the listener, primary and secondary nodes accessible to all of the other components, we found these issues were important; 
+mainly, because the database servers are in a different domain than the other components.
+
+Not all settings are done via the SSMS UI when setting up the Availability Group
+The routing URLs may need to use IP addresses
+The routing list is needed for proper read only routing
+Set the first six (6) variables for your environment and run the script in text output mode. The commands will be generated to properly configure your read only routing. The select statement at the end will show the key settings once the configuration is applied.
+
+* Note: this script configures the primary and a single secondary node.
+=====================================================
+USE [master]
+GO
+
+SET NOCOUNT ON
+GO
+
+DECLARE	  @AGName				VARCHAR(40) = 'myAvailabilityGroup' -- Availability Group Name
+		, @PrimaryNodeName		VARCHAR(40) = 'ProdDB01'
+		, @SecondaryNodeName	VARCHAR(40) = 'ProdDB02'
+		, @PrimaryNodeIP		VARCHAR(40) = '10.5.6.10'
+		, @SecondaryNodeIP		VARCHAR(40) = '10.6.6.11'
+		, @Domain				VARCHAR(40) = '.prod.net'
+		, @RouteUsingIP			TINYINT			= 1 -- 1 for True, 0 for False (1 is recommended)
+		, @PrimaryRoutingURL	VARCHAR(40) = '' -- gets set by script
+		, @SecondaryRoutingURL	VARCHAR(40) = '' -- gets set by script
+		, @SQLCommand				VARCHAR(2000)
+
+
+IF @RouteUsingIP > 0
+BEGIN
+	SET @PrimaryRoutingURL = @PrimaryNodeIP
+	SET @SecondaryRoutingURL = @SecondaryNodeIP
+END
+ELSE
+BEGIN
+	SET @PrimaryRoutingURL = @PrimaryNodeName + @Domain
+	SET @SecondaryRoutingURL = @SecondaryNodeName + @Domain
+END
+
+
+SET @SQLCommand = N'
+ALTER AVAILABILITY GROUP ['+@AGName+'] MODIFY REPLICA ON
+N'''+@PrimaryNodeName+''' WITH (SECONDARY_ROLE (ALLOW_CONNECTIONS = READ_ONLY));'
+PRINT @SQLCommand
+
+SET @SQLCommand = N'
+ALTER AVAILABILITY GROUP ['+@AGName+'] MODIFY REPLICA ON
+N'''+@PrimaryNodeName+''' WITH (SECONDARY_ROLE (READ_ONLY_ROUTING_URL = N''TCP://'+@PrimaryRoutingURL+':1433''));'
+PRINT @SQLCommand
+
+SET @SQLCommand = N'
+ALTER AVAILABILITY GROUP ['+@AGName+'] MODIFY REPLICA ON
+N'''+@SecondaryNodeName+''' WITH (SECONDARY_ROLE (ALLOW_CONNECTIONS = READ_ONLY));'
+PRINT @SQLCommand
+
+SET @SQLCommand = N'
+ALTER AVAILABILITY GROUP ['+@AGName+'] MODIFY REPLICA ON
+N'''+@SecondaryNodeName+''' WITH (SECONDARY_ROLE (READ_ONLY_ROUTING_URL = N''TCP://'+@SecondaryRoutingURL+':1433''));'
+PRINT @SQLCommand
+
+SET @SQLCommand = N'
+ALTER AVAILABILITY GROUP ['+@AGName+'] MODIFY REPLICA ON
+N'''+@PrimaryNodeName+''' WITH (PRIMARY_ROLE (READ_ONLY_ROUTING_LIST=('''+@SecondaryNodeName+''','''+@PrimaryNodeName+''')));'
+PRINT @SQLCommand
+
+SET @SQLCommand = N'
+ALTER AVAILABILITY GROUP ['+@AGName+'] MODIFY REPLICA ON
+N'''+@SecondaryNodeName+''' WITH (PRIMARY_ROLE (READ_ONLY_ROUTING_LIST=('''+@PrimaryNodeName+''','''+@SecondaryNodeName+''')));'
+PRINT @SQLCommand
+
+/*
+SELECT replica_server_name	,endpoint_url	,availability_mode_desc	,failover_mode_desc
+	,session_timeout	,primary_role_allow_connections_desc	,secondary_role_allow_connections_desc
+	,create_date	,read_only_routing_url
+FROM sys.availability_replicas
+*/
