@@ -1,0 +1,101 @@
+--PowerShell to SlipStream SQL 2008
+--https://www.sqlservercentral.com/scripts/powershell-to-slipstream-sql-2008
+--In order to install SQL Server 2008 as a clustered service on a cluster of Windows 2008R2, 
+--or Windows 2012, the SQL 2008 RTM must be upgraded by way of SlipStreaming to include the SPx upgrade files.
+--My PowerShell script automates the creation of the new SlipStreamed installation under a local folder, 
+--combining a SQL Server RTM ISO with a specified SPx upgrade file.
+==========================================================================================
+<#
+WHO:   Fahim Ahmad DBA Manager 
+WHEN:  2013-04-15
+WHY:   Create a SQL 2008 SP3 SlipStream folder on the local computer.
+       NOTE: The script below focuses on the x64 installation only, 
+             if you need a different version, please replace x64 with what you need.
+WHERE: (DBAFahim a t g m a i l . c o m)
+       https://plus.google.com/102254351697166166538
+#>
+
+	
+# BEGIN USER INPUT //////////////////////////////////////////////
+$SQLSourcePath= "\\SQLCLUST01\AppFiles\Installs\SQLServer\SQL Server 2008"
+$SQLIsoName= "SQLStd2008_All.ISO"
+
+$SQLPatchName="SQLServer2008SP3-KB2546951-x64-ENU"
+$SQLPatchVersion = "SP3"
+
+$SlipStreamBuildPath= "c:\temp\SQLServer2008" # the contents of this folder will be entirely erased.
+    
+# USER OPTION, uncomment a choice if you want to launch installer.
+    #$SQLInstallAction="InstallFailoverCluster"
+    #$SQLInstallAction="AddNode"
+    
+# END USER INPUT ////////////////////////////////////////////////
+    
+Set-ExecutionPolicry UNRESTRICTED
+CLS
+    
+TRY{
+    # Required for backwards compatibility for installing SQL 2008 on Windows 2012
+    <#
+    $Feature_fl = Get-WindowsFeature | Where-Object {$_.Name -eq "RSAT-Clustering-AutomationServer"}
+    If ($Feature_fl.Installed -ne "True") 
+    {
+        Add-WindowsFeature RSAT-Clustering-AutomationServer| Out-Null
+    }
+    #>
+
+    #    Check directory::SlipStreamBuildPath, empty, remove then re-create it from scratch
+    IF(Test-Path "$SlipStreamBuildPath")
+    {
+        Remove-Item "$SlipStreamBuildPath\*" -Force -Recurse
+    }
+    $SQLSlipStreamPatchPath = $SlipStreamBuildPath+"\"+$SQLPatchVersion
+    New-Item -ItemType directory -Path "$SQLSlipStreamPatchPath"
+
+
+    IF(Test-Path "$SQLSourcePath\$SQLIsoName")
+    {
+            #   Mount SQL Server install ISO
+        $DrivesBefore = (Get-Volume).DriveLetter
+            Mount-DiskImage -StorageType ISO -ImagePath "$SQLSourcePath\$SQLIsoName" -PassThru
+        $DrivesAfter = (Get-Volume).DriveLetter
+
+        $ISOMountPath = (compare $DrivesBefore $DrivesAfter -Passthru) + ":\"
+        Write-Host "SQL ISO Mounted at: [$ISOMountPath]" -ForegroundColor Cyan
+    }
+    ELSE
+    {
+        Throw  "SQL Iso file does not exist: [$SQLSourcePath\$SQLIsoName]"
+    }
+
+	    #	Extract contents of SQL SP installer into SP folder.
+    & "$SQLSourcePath\$SQLPatchName" /x:$SQLSlipStreamPatchPath
+
+        #    Copy/Extract ISO files to BuildPath
+    robocopy $ISOMountPath $SlipStreamBuildPath\ /E /COPYALL /NP
+
+    Dismount-DiskImage -ImagePath "$SQLSourcePath\$SQLIsoName"
+
+	    #	overwrite recent Setup.exe, and dll's
+    robocopy $SQLSlipStreamPatchPath $SlipStreamBuildPath "setup.exe" /IS
+    robocopy $SQLSlipStreamPatchPath $SlipStreamBuildPath "setup.rll" /IS
+    robocopy $SQLSlipStreamPatchPath\x64 $SlipStreamBuildPath\x64  /XF Microsoft.SQL.Chainer.PackageData.dll /IS
+
+
+	    #	Append the DefaultSetup.ini to look into new SP folder.
+    $DefaultSetupFile = "$SlipStreamBuildPath\x64\DefaultSetup.ini"
+    Set-ItemProperty -Path $DefaultSetupFile -Name IsReadOnly -Value $false
+    "PCUSOURCE=""$SQLSlipStreamPatchPath""" | Out-File -FilePath $DefaultSetupFile -Append
+
+
+    if( ($SQLInstallAction -eq"InstallFailoverCluster") -OR ($SQLInstallAction -eq"AddNode") )
+    {
+        & "$SlipStreamBuildPath\SETUP.EXE" /Action=$SQLInstallAction 
+    }
+    
+    Write-Host "SQL Slipstream complete.  Insall path = [$SlipStreamBuildPath]" -ForegroundColor Cyan
+}
+Catch [System.Exception]
+{
+   Write-Host $_.Exception.ToString() -Backgroundcolor RED
+}
