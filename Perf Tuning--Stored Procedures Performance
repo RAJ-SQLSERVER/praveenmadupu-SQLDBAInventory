@@ -1,0 +1,29 @@
+--Perf Tuning--Stored Procedures Performance
+--You can reset the counters any time by using the following statement:
+--DBCC FREEPROCCACHE;
+
+SELECT DB_NAME(database_id) DBName, 
+ OBJECT_NAME(object_id) SPName,
+ datediff(second, last_execution_time, getdate()) SecondsAgo, 
+ last_execution_time LastExecDate,
+ CASE WHEN execution_count = 0 THEN '--' ELSE
+ RIGHT('0'+convert(varchar(5),(total_elapsed_time/(1000000*execution_count))/3600),2)+':'+ 
+ RIGHT('0'+convert(varchar(5),(total_elapsed_time/(1000000*execution_count))%3600/60),2)+':'+ 
+ RIGHT('0'+convert(varchar(5),((total_elapsed_time/(1000000*execution_count))%60)),2) END ReadableTime, 
+ CASE WHEN execution_count= 0 THEN 0 ELSE total_elapsed_time/(1000*execution_count) END AvgTimeMS,
+ CASE WHEN execution_count= 0 THEN 0 ELSE total_worker_time/(1000*execution_count) END AvgTimeCPU,
+ last_elapsed_time/1000 LastTimeMS,
+ min_elapsed_time/1000 MinTimeMS,
+ total_elapsed_time/1000 TotalTimeMS,
+ CASE WHEN DATEDIFF(second, s.cached_time, GETDATE()) < 1 THEN 0 ELSE
+ cast(execution_count as decimal) / cast(DATEDIFF(second, s.cached_time, GETDATE()) as decimal) END ExecPerSecond,
+ execution_count TotalExecCount, 
+ last_worker_time/1000 LastWorkerCPU,
+ last_physical_reads LastPReads,
+ max_physical_reads MaxPReads,
+ last_logical_writes LastLWrites,
+ last_logical_reads LastLReads 
+FROM sys.dm_exec_procedure_stats s 
+WHERE database_id = DB_ID() 
+AND last_execution_time > dateadd(day, -7, getdate())
+ORDER BY 6 desc, 3
