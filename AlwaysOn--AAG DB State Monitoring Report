@@ -1,0 +1,47 @@
+--AAG DB State Monitoring
+--https://www.sqlservercentral.com/scripts/aag-db-state-monitoring
+--This AAG Database State monitoring Script could be added as a step in a SQL job that runs frequently 
+--to check the status of AAG Database Synchronization.
+====================================================================
+declare @subject varchar(100)
+declare @xml nvarchar(max)
+declare @body nvarchar(max)
+set nocount on
+Create table #output(InstName varchar(50),
+					 AGName varchar(50),
+					 DBName varchar(50),
+					 [State] varchar(20)
+					 )
+						
+insert into #output(InstName, AGName, DBName, [State])
+
+select @@servername, ag.[name], sd.[name], hdrs.synchronization_state_desc
+from sys.availability_groups ag join sys.dm_hadr_availability_group_states hags
+on ag.group_id = hags.group_id join sys.dm_hadr_database_replica_states hdrs
+on hags.group_id = hdrs.group_id join sys.sysdatabases sd
+on hdrs.database_id = sd.dbid
+where hdrs.synchronization_state_desc not in('SYNCHRONIZING', 'SYNCHRONIZED')
+
+if @@rowcount > 0
+begin
+set @xml = cast((select InstName as 'td','', AGName as 'td','', DBName as 'td','', [State] as 'td'
+			from #output
+			for xml path('tr'), elements ) as nvarchar(max))
+
+set @body = '<html><body><H3>AAG Status Report</H3>
+<table border =1>
+<tr>
+<th> ServerName </th> <th> Availability Group </th> <th> Database </th> <th> Status </th></tr>'
+
+set @subject = 'Availability Group not Synchronizing: ' 
+set @body = @body + @xml + '</table><body></html>'
+	
+	EXEC msdb.dbo.sp_send_dbmail 
+	@profile_name = 'Default',
+	@recipients='DBA@SomeDomain.com',
+    @subject = @subject,
+    @body = @body,
+    @body_format = 'HTML' ;
+
+end
+drop table #output
