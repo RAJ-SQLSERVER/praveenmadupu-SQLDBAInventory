@@ -1,0 +1,59 @@
+--Extract SQL Server Key details
+--https://www.sqlservercentral.com/scripts/extract-sql-server-key-details
+--Open Powershell_ISE and copy and paste the code.
+--Change the location of the serverlist and the output file location accordingly.
+=============================================================================================
+import-module "SQLPS" -DisableNameChecking
+set-location "C:\Powershell\SQL_Server_Key_details\";
+$ErrorActionPreference = "SilentlyContinue";
+
+$servers = get-content "C:\Powershell\SQL_Server_Key_details\serverlist.txt";
+#$servers.Count
+$newset = $servers.Replace("\MongoMongo","") #Pass the instance name (given an arbirtrary name as \MongoMongo)
+
+foreach ($server in $newset)
+{
+    $status = @{ "ServerName" = $server; "TimeStamp" = (Get-Date -f s) }
+    if (!(Test-Connection $server -Count 1 -ea 0 -Quiet))
+    { 
+        #Server is DOWN
+        $status["Results"] = "DOWN";
+        Write-Host "SQL Services on Server [$($server)]" -foregroundcolor "RED"
+    } 
+
+    else 
+    {
+
+        #Server is UP
+        $status["Results"] = "UP"
+        $sqlservices = Get-Service -ComputerName $server | Where-Object {$_.ServiceName -like "MSSQL`$MongoMongo"}
+        Write-Host "SQL Services on Server [$($server)]" -foregroundcolor "Green" -backgroundcolor pink;
+        $status += $sqlservices | Select-Object Name, DisplayName, Status;
+
+        write-host "Results from $server” -foregroundcolor "Green";
+        $sqldbserviceInfo = gwmi -class win32_service -ComputerName $server -Namespace "root\cimv2" -Filter "Name='MSSQL$`MongoMongo' OR Name='SQLAGENT$`MongoMongo'"
+        $sqlserviceresult = New-Object PSObject -Property @{
+        'ServerName' = $server
+        ‘ServiceName’ = $sqldbserviceInfo.DisplayName
+        ‘ServiceAccount’ = $sqldbserviceInfo.StartName
+        ‘StartMode’ = $sqldbserviceInfo.StartMode
+        ‘ServiceState’ = $sqldbserviceInfo.State
+        }
+
+        $sqlserviceresult | select ServerName, ServiceName, ServiceAccount, StartMode, ServiceState
+
+        $allserviceInfo = gwmi -class win32_service -ComputerName $server -Namespace "root\cimv2""
+        #$sqldbsvcinfo = $allserviceinfo | select-object DisplayName, StartName, StartMode, State #| where-object {$_.Name -eq "MSSQL$`MongoMongo"}
+        $sqlsbsvcinfo
+
+        #$serviceInfo #|Format-Table -AutoSize
+        #New-Object -TypeName PSObject -Property $status -OutVariable serverStatus
+        #$collection += $serverStatus
+        #$sqlserviceresult | select ServerName, ServiceName, ServiceAccount, StartMode, ServiceState | Out-File -filepath "
+        
+        $sqlserviceresult | select ServerName, ServiceName, ServiceAccount, StartMode, ServiceState | Out-File -filepath "C:\Powershell\SQL_Server_Key_details\good_servers.txt" -append
+
+
+    }
+}
+$output | Out-File -filepath "C:\Powershell\SQL_Server_Key_details\good_servers.txt" -append
