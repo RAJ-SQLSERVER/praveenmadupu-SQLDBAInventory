@@ -1,0 +1,45 @@
+--DB memory/RAM consumption
+===================================================================
+This script is used to get the memory or RAM consumption for the database(s).
+--complete db list
+--exec prc_dba_ram_consumption @dbname = '*'
+--particular db
+--exec prc_dba_ram_consumption @dbname = 'adventureworks'
+===================================================================
+ create procedure prc_dba_ram_consumption 
+@dbname varchar(128) = ''
+as
+begin
+
+set nocount on;
+
+if @dbname = '*'
+	set @dbname = ''
+
+set @dbname = nullif(@dbname,'')
+
+;with getdblist
+as
+(
+select
+isnull(db_name(database_id), 'resourcedb') [dbname]
+, cast(count(row_count)/128.0 as decimal(10,2)) [size]
+from sys.dm_os_buffer_descriptors
+group by database_id
+)
+select dbname [databasename],size [size in MB]
+from getdblist
+where dbname = isnull(@dbname,dbname)
+order by dbname
+
+set nocount off;
+
+end
+go
+
+--examples
+
+--complete db list
+exec prc_dba_ram_consumption @dbname = '*'
+--particular db
+exec prc_dba_ram_consumption @dbname = 'adventureworks'
