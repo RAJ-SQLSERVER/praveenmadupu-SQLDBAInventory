@@ -1,0 +1,1277 @@
+--Change Database Collation
+--https://www.sqlservercentral.com/scripts/change-database-collation
+ -- Name:		sp_ChangeDatabaseCollation
+-- Type:		Stored Procedure
+-- Version:		1.0
+-- Date:		9/30/2014
+-- Author:		Arlo Fuller, with credit to:
+--				Raymund Macaalay - http://www.codeproject.com/Articles/302405/The-Easy-way-of-changing-Collation-of-all-Database
+--				Adam Machanic - http://sqlblog.com/blogs/adam_machanic/default.aspx for the ScriptCreateTableKeys and ScriptDropTableKeys code
+-- Purpose:		Change the collation for an entire SQL Server database, compatible with SQL Server 2005 onwards
+-- Parameters:	(1) DBName - NVARCHAR(255) - the name of the database to change the collation of - MANDATORY
+--				(2) NewCollation - NVARCHAR(255) - the name of the new collation to apply to the database - MANDATORY
+--				(3) JustPrintStatements - BIT (default 1 if not provided) - If JustPrintStatements = 1 then the SP returns two resultsets (drop statements and then create statements)
+--																			If JustPrintStatements = 0 then the SP actually executes the generated SQL and applies the schema / collation changes
+--				(4) DebugPrintSQL - BIT (default 0 if not provided) -	If DebugPrintSQL = 0 then nothing is output to the Messages tab in SSMS or the output window in osql
+--																		If DebugPrintSQL = 1 then the statements being generated / run are output to the Messages tab in SSMS
+-- Description:	This stored procedure (created in the master database by default) automates the process of changing the collation of a SQL Server database.  It takes into account the impact of
+--				dependent objects that prevent collation from being changed at the database level e.g. foreign key constraints, default constraints, indexes etc.  The script writes out a series of
+--				SQL DDL statements (in sequence order) to do the following:
+--				(1) Drop Primary keys and foreign keys
+--				(2) Drop Default constraints
+--				(3) Drop Indexes
+--				(4) Drop Check constraints
+--				(5) Drop Computed columns
+--				(6) Issues ALTER COLUMN statements for any (N)CHAR, (N)VARCHAR and (N)TEXT columns with the new collation.
+--				(7) Drops UDF's
+--				(8) Drops views
+--				(9) Set the target database into SINGLE_USER mode - THIS WILL DROP ALL EXISTING CONNECTIONS TO THE DATABASE AND ANY UNCOMMITTED TRANSACTIONS WILL BE LOST
+--				(10) Changes the database collation at the database level to the new collation
+--				(11) Set the target database back to MULTI_USER
+--				(12) Recreate Primary keys and foreign keys
+--				(13) Re-add Default constraints
+--				(14) Re-add Indexes
+--				(15) Re-add Check constraints
+--				(16) Re-add Computed columns
+--				(17) Re-add UDF's
+--				(18) Re-add views
+--				(19) Reassign permissions to objects that were dropped and recreated
+--
+-- This stored procedure is provided "as is".  Use it at your own risk and test it out first of all on a test system / database.  Always take a backup first!  Enjoy!!
+
+USE master
+GO
+
+IF EXISTS (SELECT * FROM sys.objects WHERE type = 'P' AND name = 'sp_ChangeDatabaseCollation') DROP PROCEDURE sp_ChangeDatabaseCollation
+GO
+
+CREATE PROCEDURE sp_ChangeDatabaseCollation (@DBName NVARCHAR(255), @NewCollation NVARCHAR(255), @JustPrintStatements BIT = 1, @DebugPrintSQL BIT = 0) AS
+BEGIN
+	SET NOCOUNT ON
+	DECLARE @CrLf NVARCHAR(10),
+			@sql NVARCHAR(MAX),
+			@bigsql NVARCHAR(MAX)
+
+	DECLARE @DuplicateUsers TABLE (UserName NVARCHAR(255))
+
+	SET @CrLf = CHAR(13) + CHAR(10)
+
+	IF @NewCollation NOT IN (SELECT name FROM sys.fn_HelpCollations())
+	BEGIN
+		SET @sql = 'ERROR: cannot proceed with collation change.  The collation name ' + CHAR(39) + @NewCollation + CHAR(39) + ' is invalid.'
+		RAISERROR(@sql, 11, 1)
+		RETURN 1
+	END
+
+	-- If we are changing to a case-insensitive collation, then we need to check for duplicate user names first as any duplicate user names will prevent
+	-- the change collation process to a case insensitive collation
+	IF EXISTS (SELECT * FROM sys.fn_HelpCollations() WHERE description LIKE '%case-insensitive%' AND name = @NewCollation)
+	BEGIN
+		SET @sql = 'USE [' + @DBName + ']; SELECT LOWER(name) AS username FROM sys.sysusers GROUP BY LOWER(name) HAVING SUM(1) > 1'
+		INSERT INTO @DuplicateUsers
+		EXEC sp_executesql @sql
+
+		IF EXISTS (SELECT UserName FROM @DuplicateUsers)
+		BEGIN
+			SET @sql = 'ERROR: cannot proceed with collation change as there are duplicate users in the Security section of database ' + @DBName + '.  See the Results tab for details.  Please resolve the duplicates before proceeding.'
+			RAISERROR(@sql, 11, 1)
+			SELECT UserName FROM @DuplicateUsers
+			RETURN 1
+		END
+	END
+
+	-- First drop (if already exists) and create a stored procedure to drop PK's and FK's
+	-- Credit for this stored procedure goes to Adam Machanic - http://sqlblog.com/blogs/adam_machanic/default.aspx
+	SET @sql = REPLACE('IF EXISTS (SELECT * FROM sys.objects WHERE type = ''P'' AND name = ''ScriptDropTableKeys'') DROP PROCEDURE ScriptDropTableKeys', CHAR(39), CHAR(39)+CHAR(39))
+	SET @bigsql = 'USE [' + @DBName + ']; EXEC sp_executesql N''' + @sql + '''';
+	EXEC (@bigsql)
+	SET @sql = 
+	'CREATE PROCEDURE ScriptDropTableKeys
+	@table_name SYSNAME
+AS
+	SET NOCOUNT ON
+
+	--Note: Disabled keys and constraints are ignored
+	--TODO: Drop and re-create referencing XML indexes, FTS catalogs
+
+	DECLARE @crlf CHAR(2)
+	SET @crlf =  '''' --CHAR(13) + CHAR(10)
+	DECLARE @version CHAR(4)
+	SET @version = SUBSTRING(@@VERSION, LEN(''Microsoft SQL Server'') + 2, 4)
+	DECLARE @object_id INT
+	SET @object_id = OBJECT_ID(@table_name)
+	DECLARE @sql NVARCHAR(MAX)
+
+	IF @version NOT IN (''2005'', ''2008'', ''2012'')
+	BEGIN
+		RAISERROR(''This script only supports SQL Server 2005, 2008 and 2012'', 16, 1)
+		RETURN
+	END
+
+	SELECT
+		''ALTER TABLE '' + 
+			QUOTENAME(OBJECT_SCHEMA_NAME(parent_object_id)) + ''.'' + 
+			QUOTENAME(OBJECT_NAME(parent_object_id)) + @crlf +
+		''DROP CONSTRAINT '' + QUOTENAME(name) + '';'' + 
+			@crlf + @crlf COLLATE database_default AS [-- Drop Referencing FKs]
+	FROM sys.foreign_keys
+	WHERE
+		referenced_object_id = @object_id
+		AND is_disabled = 0
+	ORDER BY
+		key_index_id DESC
+
+	SET @sql = '''' +
+		''SELECT '' +
+			''statement AS [-- Drop Candidate Keys] '' +
+		''FROM '' +
+		''( '' +
+			''SELECT '' +
+				''CASE '' +
+					''WHEN 1 IN (i.is_unique_constraint, i.is_primary_key) THEN '' +
+						''''''ALTER TABLE '''' + '' +
+							''QUOTENAME(OBJECT_SCHEMA_NAME(i.object_id)) + ''''.'''' + '' +
+							''QUOTENAME(OBJECT_NAME(i.object_id)) + @crlf + '' +
+						''''''DROP CONSTRAINT '''' + QUOTENAME(i.name) + '''';'''' + '' +
+							''@crlf + @crlf COLLATE database_default '' +
+					''ELSE '' +
+						''''''DROP INDEX '''' + QUOTENAME(i.name) + @crlf + '' +
+						''''''ON '''' + '' +
+							''QUOTENAME(OBJECT_SCHEMA_NAME(object_id)) + ''''.'''' + '' +
+							''QUOTENAME(OBJECT_NAME(object_id)) + '''';'''' + '' +
+								''@crlf + @crlf COLLATE database_default '' +
+				''END AS statement, '' +
+				''i.index_id '' +
+			''FROM sys.indexes AS i '' +
+			''WHERE '' +
+				''i.object_id = @object_id '' +
+				''AND i.is_unique = 1 '' +
+				--filtered and hypothetical indexes cannot be candidate keys
+				CASE @version
+					WHEN ''2008'' THEN ''AND i.has_filter = 0 ''
+					ELSE ''''
+				END +
+				''AND i.is_hypothetical = 0 '' +
+				''AND i.is_disabled = 0 '' +
+		'') AS x '' +
+		''ORDER BY '' +
+			''index_id DESC ''
+
+	EXEC sp_executesql @sql, N''@object_id INT, @crlf CHAR(2)'', @object_id, @crlf'
+	SET @bigsql = 'USE [' + @DBName + ']; EXEC (''' + REPLACE(@sql, CHAR(39), CHAR(39)+CHAR(39)) + ''')'
+	EXEC (@bigsql)
+
+	-- Next, drop (if already exists) and create a stored procedure to recreate PK's and FK's
+	-- Credit for this stored procedure goes to Adam Machanic - http://sqlblog.com/blogs/adam_machanic/default.aspx
+	SET @sql = 'IF EXISTS (SELECT * FROM sys.objects WHERE type = ''P'' AND name = ''ScriptCreateTableKeys'') DROP PROCEDURE ScriptCreateTableKeys'
+	SET @bigsql = 'USE [' + @DBName + ']; EXEC sp_executesql N''' + REPLACE(@sql, CHAR(39), CHAR(39)+CHAR(39)) + ''''
+	EXEC (@bigsql)
+	SET @sql = CONVERT(NVARCHAR(MAX),
+	'CREATE PROCEDURE ScriptCreateTableKeys
+	@table_name SYSNAME
+AS
+BEGIN
+	SET NOCOUNT ON
+
+	--Note: Disabled keys and constraints are ignored
+	--TODO: Drop and re-create referencing XML indexes, FTS catalogs
+
+	DECLARE @crlf CHAR(2)
+	SET @crlf = CHAR(13) + CHAR(10)
+	DECLARE @version CHAR(4)
+	SET @version = SUBSTRING(@@VERSION, LEN(''Microsoft SQL Server'') + 2, 4)
+	DECLARE @object_id INT
+	SET @object_id = OBJECT_ID(@table_name)
+	DECLARE @sql NVARCHAR(MAX)
+
+	IF @version NOT IN (''2005'', ''2008'', ''2012'')
+	BEGIN
+		RAISERROR(''This script only supports SQL Server 2005, 2008 and 2012'', 16, 1)
+		RETURN
+	END
+
+	SET @sql = '''' +
+		''SELECT '' +
+			''CASE '' +
+				''WHEN 1 IN (i.is_primary_key, i.is_unique_constraint) THEN '' +
+					''''''ALTER TABLE '''' + '' +
+						''QUOTENAME(OBJECT_SCHEMA_NAME(i.object_id)) + ''''.'''' + '' +
+						''QUOTENAME(OBJECT_NAME(i.object_id)) + @crlf + '' +
+					''''''ADD '''' + '' +
+						''CASE k.is_system_named '' +
+							''WHEN 0 THEN ''''CONSTRAINT '''' + QUOTENAME(k.name) + @crlf '' +
+							''ELSE '''''''' '' +
+						''END + '' +
+					''CASE k.type '' +
+						''WHEN ''''UQ'''' THEN ''''UNIQUE'''' '' +
+						''ELSE ''''PRIMARY KEY'''' '' +
+					''END + '''' '''' + '' +
+					''i.type_desc  + @crlf + '' +
+					''kc.key_columns + @crlf '' +
+				''ELSE '' +
+					''''''CREATE UNIQUE '''' + i.type_desc + '''' INDEX '''' + '' +
+						''QUOTENAME(i.name) + @crlf + '' +
+					''''''ON '''' + '' +
+						''QUOTENAME(OBJECT_SCHEMA_NAME(i.object_id)) + ''''.'''' + '' +
+						''QUOTENAME(OBJECT_NAME(i.object_id)) + @crlf + '' +
+					''kc.key_columns + @crlf + '' +
+					''COALESCE '' +
+					''( '' +
+						''''''INCLUDE '''' + @crlf + '' +
+						''''''( '''' + @crlf + '' +
+							''STUFF '' +
+							''( '' +
+								''( '' +
+									''SELECT '' +
+									''( '' +
+										''SELECT '' +
+											'''''','''' + @crlf + '''' '''' + QUOTENAME(c.name) AS [text()] '' +
+										''FROM sys.index_columns AS ic '' +
+										''JOIN sys.columns AS c ON '' +
+											''c.object_id = ic.object_id '' +
+											''AND c.column_id = ic.column_id '' +
+										''WHERE '' +
+											''ic.object_id = i.object_id '' +
+											''AND ic.index_id = i.index_id '' +
+											''AND ic.is_included_column = 1 '' +
+										''ORDER BY '' +
+											''ic.key_ordinal '' +
+										''FOR XML PATH(''''''''), TYPE '' +
+									'').value(''''.'''', ''''VARCHAR(MAX)'''') '' +
+								''), '' +
+								''1, '' +
+								''3, '' +
+								'''''''''' '' +
+							'') + @crlf + '' +
+						'''''')'''' + @crlf, '' +
+						'''''''''' '' +
+					'') '' +
+			''END + '' +
+			''''''WITH '''' + @crlf + '' +
+			''''''('''' + @crlf + '' +
+				'''''' PAD_INDEX = '''' + '' +
+						''CASE CONVERT(VARCHAR, i.is_padded) '' +
+							''WHEN 1 THEN ''''ON'''' '' +
+							''ELSE ''''OFF'''' '' +
+						''END + '''','''' + @crlf + '' +
+				''CASE i.fill_factor '' +
+					''WHEN 0 THEN '''''''' '' +
+					''ELSE '' +
+						'''''' FILLFACTOR = '''' + '' +
+								''CONVERT(VARCHAR, i.fill_factor) + '''','''' + @crlf '' +
+				''END + '' +
+				'''''' IGNORE_DUP_KEY = '''' + '' +
+						''CASE CONVERT(VARCHAR, i.ignore_dup_key) '' +
+							''WHEN 1 THEN ''''ON'''' '' +
+							''ELSE ''''OFF'''' '' +
+						''END + '''','''' + @crlf + '' +
+				'''''' ALLOW_ROW_LOCKS = '''' + '' +
+						''CASE CONVERT(VARCHAR, i.allow_row_locks) '' +
+							''WHEN 1 THEN ''''ON'''' '' +
+							''ELSE ''''OFF'''' '' +
+						''END + '''','''' + @crlf + '' +
+				'''''' ALLOW_PAGE_LOCKS = '''' + '' +
+						''CASE CONVERT(VARCHAR, i.allow_page_locks) '' +
+							''WHEN 1 THEN ''''ON'''' '' +
+							''ELSE ''''OFF'''' '' +
+						''END + '' +
+				CASE @version
+					WHEN ''2005'' THEN ''''
+					ELSE			 
+						'''''','''' + @crlf + '' +
+						'''''' DATA_COMPRESSION = '''' + '' +
+							''( '' +
+								''SELECT '' +
+									''CASE '' +
+										''WHEN MIN(p.data_compression_desc) = MAX(p.data_compression_desc) THEN MAX(p.data_compression_desc) '' +
+										''ELSE ''''[PARTITIONS USE MULTIPLE COMPRESSION TYPES]'''' '' +
+									''END '' +
+								''FROM sys.partitions AS p '' +
+								''WHERE '' +
+									''p.object_id = i.object_id '' +
+									''AND p.index_id = i.index_id '' +
+							'') ''
+				END + ''+ @crlf + '' +
+			'''''') '''' + @crlf + '' +
+			''''''ON '''' + ds.data_space + '''';'''' + '' +
+				''@crlf + @crlf COLLATE database_default AS [-- Create Candidate Keys] '' +
+		''FROM sys.indexes AS i '' +
+		''LEFT OUTER JOIN sys.key_constraints AS k ON '' +
+			''k.parent_object_id = i.object_id '' +
+			''AND k.unique_index_id = i.index_id '' +
+		''CROSS APPLY '' +
+		''( '' +
+			''SELECT '' +
+				''''''( '''' + @crlf + '' +
+					''STUFF '' +
+					''( '' +
+						''( '' +
+							''SELECT '' +
+							''( '' +
+								''SELECT '' +
+									'''''','''' + @crlf + '''' '''' + QUOTENAME(c.name) AS [text()] '' +
+								''FROM sys.index_columns AS ic '' +
+								''JOIN sys.columns AS c ON '' +
+									''c.object_id = ic.object_id '' +
+									''AND c.column_id = ic.column_id '' +
+								''WHERE '' +
+									''ic.object_id = i.object_id '' +
+									''AND ic.index_id = i.index_id '' +
+									''AND ic.key_ordinal > 0 '' +
+								''ORDER BY '' +
+									''ic.key_ordinal '' +
+								''FOR XML PATH(''''''''), TYPE '' +
+							'').value(''''.'''', ''''VARCHAR(MAX)'''') '' +
+						''), '' +
+						''1, '' +
+						''3, '' +
+						'''''''''' '' +
+					'') + @crlf + '' +
+				'''''')'''' '' +
+		'') AS kc (key_columns) '' +
+		''CROSS APPLY '' +
+		''( '' +
+			''SELECT '' +
+				''QUOTENAME(d.name) + '' +
+					''CASE d.type '' +
+						''WHEN ''''PS'''' THEN '' +
+							''+ '' +
+							''''''('''' + '' +
+								''( '' +
+									''SELECT '' +
+										''QUOTENAME(c.name) '' +
+									''FROM sys.index_columns AS ic '' +
+									''JOIN sys.columns AS c ON '' +
+										''c.object_id = ic.object_id '' +
+										''AND c.column_id = ic.column_id '' +
+									''WHERE '' +
+										''ic.object_id = i.object_id '' +
+										''AND ic.index_id = i.index_id '' +
+										''AND ic.partition_ordinal = 1 '' +
+								'') + '' +
+							'''''')'''' '' +
+						''ELSE '''''''' '' +
+					''END '' +
+			''FROM sys.data_spaces AS d '' +
+			''WHERE '' +
+				''d.data_space_id = i.data_space_id '' +
+		'') AS ds (data_space) '' +
+		''WHERE '' +
+			''i.object_id = @object_id '' +
+			''AND i.is_unique = 1 '' +
+			--filtered and hypothetical indexes cannot be candidate keys
+			CASE @version
+				WHEN ''2008'' THEN ''AND i.has_filter = 0 ''
+				ELSE ''''
+			END +
+			''AND i.is_hypothetical = 0 '' +
+			''AND i.is_disabled = 0 '' +
+		''ORDER BY '' +
+			''i.index_id ''
+
+	EXEC sp_executesql
+@sql,
+		N''@object_id INT, @crlf CHAR(2)'',
+		@object_id, @crlf
+
+	SELECT
+		''ALTER TABLE '' + 
+			QUOTENAME(OBJECT_SCHEMA_NAME(fk.parent_object_id)) + ''.'' + 
+			QUOTENAME(OBJECT_NAME(fk.parent_object_id)) + @crlf +
+		CASE fk.is_not_trusted
+			WHEN 0 THEN ''WITH CHECK ''
+			ELSE ''WITH NOCHECK ''
+		END + 
+			''ADD '' +
+				CASE fk.is_system_named
+					WHEN 0 THEN ''CONSTRAINT '' + QUOTENAME(name) + @crlf
+					ELSE ''''
+				END +
+		''FOREIGN KEY '' + @crlf + 
+		''( '' + @crlf + 
+			STUFF
+(
+(
+					SELECT
+(
+						SELECT 
+							'','' + @crlf + '' '' + QUOTENAME(c.name) AS [text()]
+						FROM sys.foreign_key_columns AS fc
+						JOIN sys.columns AS c ON
+							c.object_id = fc.parent_object_id
+							AND c.column_id = fc.parent_column_id
+						WHERE 
+							fc.constraint_object_id = fk.object_id
+						ORDER BY
+							fc.constraint_column_id
+						FOR XML PATH(''''), TYPE
+					).value(''.'', ''VARCHAR(MAX)'')
+				),
+				1,
+				3,
+				''''
+			) + @crlf + 
+		'') '' +
+		''REFERENCES '' + 
+			QUOTENAME(OBJECT_SCHEMA_NAME(fk.referenced_object_id)) + ''.'' + 
+			QUOTENAME(OBJECT_NAME(fk.referenced_object_id)) + @crlf +
+		''( '' + @crlf + 
+			STUFF
+(
+(
+					SELECT
+(
+						SELECT 
+							'','' + @crlf + '' '' + QUOTENAME(c.name) AS [text()]
+						FROM sys.foreign_key_columns AS fc
+						JOIN sys.columns AS c ON
+							c.object_id = fc.referenced_object_id
+							AND c.column_id = fc.referenced_column_id
+						WHERE 
+							fc.constraint_object_id = fk.object_id
+						ORDER BY
+							fc.constraint_column_id
+						FOR XML PATH(''''), TYPE
+					).value(''.'', ''VARCHAR(MAX)'')
+				),
+				1,
+				3,
+				''''
+			) + @crlf + 
+		'');'' + 
+			@crlf + @crlf COLLATE database_default AS [-- Create Referencing FKs]
+	FROM sys.foreign_keys AS fk
+	WHERE
+		referenced_object_id = @object_id
+		AND is_disabled = 0
+	ORDER BY
+		key_index_id' + @CrLf + 'END')
+	SET @bigsql = 'USE [' + @DBName + ']; EXEC (''' + REPLACE(@sql, CHAR(39), CHAR(39)+CHAR(39)) + ''')'
+	EXEC (@bigsql)
+
+	-- Now, with the 2 new stored procedures in place (ScriptCreateTableKeys and ScriptDropTablekeys), iterate through all of the user tables in the target database
+	-- and generate appropriate CREATE / DROP / ALTER TABLE statements to drop and recreate PK's and FK's.
+	DECLARE @MyTableCursor AS CURSOR
+	DECLARE @TableName nvarchar(255)
+	DECLARE @CreateScripts TABLE (ID INT IDENTITY(1,1), SQLStatement NVARCHAR(MAX))
+	DECLARE @DropScripts TABLE (ID INT IDENTITY(1,1), SQLStatement NVARCHAR(MAX))
+ 
+	SET @sql = 'SELECT name FROM sys.tables WHERE [type] = ''U'' and name <> ''sysdiagrams'' ORDER BY name'
+	SET @bigsql = 'USE [' + @DBName + ']; SET @cursor = CURSOR FORWARD_ONLY STATIC FOR ' + @sql + ' OPEN @cursor;'
+ 
+	EXEC sys.sp_executesql @bigsql, N'@cursor cursor output', @MyTableCursor output
+
+	FETCH NEXT FROM @MyTableCursor INTO @TableName
+	WHILE @@FETCH_STATUS = 0
+	BEGIN
+		SET @sql = 'USE [' + @DBName + ']; EXEC ScriptCreateTableKeys ''' + @TableName + ''''
+		INSERT INTO @CreateScripts (SQLStatement)
+		EXEC sp_executesql @sql
+		SET @sql = 'USE [' + @DBName + ']; EXEC ScriptDropTableKeys ''' + @TableName + ''''
+		INSERT INTO @DropScripts (SQLStatement)
+		EXEC sp_executesql @sql
+		FETCH NEXT FROM @MyTableCursor INTO @TableName
+	END
+	CLOSE @MyTableCursor
+	DEALLOCATE @MyTableCursor
+
+	-- Now script out statements to recreate check constraints
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''ALTER TABLE  '' + QuoteName(OBJECT_NAME(so.parent_obj)) + '' ADD CONSTRAINT '' + QuoteName(CONSTRAINT_NAME) + '' CHECK '' + CHECK_CLAUSE
+	FROM		INFORMATION_SCHEMA.CHECK_CONSTRAINTS cc
+	INNER JOIN	sys.sysobjects so ON cc.CONSTRAINT_NAME = so.[name]'
+	INSERT INTO @CreateScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Now script out statements to drop check constraints
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''IF EXISTS (SELECT OBJECT_ID('' + QUOTENAME(CONSTRAINT_NAME, CHAR(39)) + '', '' + CHAR(39) + ''C'' + CHAR(39) + '') FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS) ALTER TABLE  '' + QuoteName(OBJECT_NAME(so.parent_obj)) + '' DROP CONSTRAINT '' + QuoteName(CONSTRAINT_NAME)
+	FROM		INFORMATION_SCHEMA.CHECK_CONSTRAINTS cc
+	INNER JOIN	sys.sysobjects so ON cc.CONSTRAINT_NAME = so.[name]'
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Now script out statements to recreate default constraints
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''ALTER TABLE ['' + schema_name(Tab.schema_id) + ''].['' + OBJECT_NAME(DefCons.parent_object_id) +''] ADD CONSTRAINT [''+DefCons.name+''] DEFAULT '' + DefCons.definition + '' FOR ['' + Col.name + '']''
+	FROM		sys.default_constraints AS DefCons
+	INNER JOIN	sys.columns AS Col ON DefCons.parent_object_id = Col.object_id AND DefCons.parent_column_id = Col.column_id
+	INNER JOIN	sys.tables Tab ON Tab.object_id=Col.OBJECT_ID'
+	INSERT INTO @CreateScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Now script out statements to drop check constraints
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''ALTER TABLE ['' + schema_name(Tab.schema_id) + ''].['' + OBJECT_NAME(DefCons.parent_object_id) +''] DROP CONSTRAINT [''+DefCons.name+'']''
+	FROM		sys.default_constraints AS DefCons
+	INNER JOIN	sys.columns AS Col ON DefCons.parent_object_id = Col.object_id AND DefCons.parent_column_id = Col.column_id
+	INNER JOIN	sys.tables Tab ON Tab.object_id=Col.OBJECT_ID'
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	SET @sql = 'USE [' + @DBName + '];
+	-- Script out indexes completely, including both PK''s and regular indexes, each clustered or nonclustered.
+	-- DOES NOT HANDLE COMPRESSION; that''s ok, since 2008 R2 RTM benchmarking shows it''s faster and results in smaller indexes to insert uncompressed and then compress later
+	-- HARDCODES [dbo] schema (i.e. it doesn''t say [JohnDoe].[table], changing that to [dbo].[table]
+	-- originally from http://www.sqlservercentral.com/Forums/Topic961088-2753-2.aspx
+
+	DECLARE
+	@idxTableName SYSNAME,
+	@idxTableID INT,
+	@idxname SYSNAME,
+	@idxid INT,
+	@colCount INT,
+	@colCountWithoutIncludedColumns INT ,
+	@IxColumn SYSNAME,
+	@IxFirstColumn BIT,
+	@ColumnIDInTable INT,
+	@ColumnIDInIndex INT,
+	@IsIncludedColumn INT,
+	@sIncludeCols NVARCHAR(MAX),
+	@sIndexCols NVARCHAR(MAX),
+	@sSQL NVARCHAR(MAX),
+	@sDSQL NVARCHAR(MAX),
+	@sParamSQL NVARCHAR(MAX),
+	@sFilterSQL NVARCHAR(MAX),
+	@location SYSNAME,
+	@IndexCount INT,
+	@CurrentIndex INT,
+	@CurrentCol INT,
+	@Name NVARCHAR(128),
+	@IsPrimaryKey TINYINT,
+	@Fillfactor INT,
+	@FilterDefinition NVARCHAR(MAX),
+	@IsClustered BIT -- used solely for putting information into the result table
+
+
+	IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects WHERE id = object_id(N''[tempdb].[dbo].[#IndexSQL]''))
+	DROP TABLE [dbo].[#IndexSQL]
+
+	CREATE TABLE #IndexSQL
+	( TableName NVARCHAR(128) NOT NULL
+	 ,IndexName NVARCHAR(128) NOT NULL
+	 ,IsClustered BIT NOT NULL
+	 ,IsPrimaryKey BIT NOT NULL
+	 ,IndexCreateSQL NVARCHAR(max) NOT NULL
+	 ,IndexDropSQL NVARCHAR(MAX) NOT NULL
+	)
+
+	IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects WHERE id = object_id(N''[tempdb].[dbo].[#IndexListing]''))
+	DROP TABLE [dbo].[#IndexListing]
+
+	CREATE TABLE #IndexListing
+	(
+	[IndexListingID] INT IDENTITY(1,1) PRIMARY KEY CLUSTERED,
+	[TableName] SYSNAME COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	[ObjectID] INT NOT NULL,
+	[IndexName] SYSNAME COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	[IndexID] INT NOT NULL,
+	[IsPrimaryKey] TINYINT NOT NULL,
+	[FillFactor] INT,
+	[FilterDefinition] NVARCHAR(MAX) NULL
+	)
+
+	IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects WHERE id = object_id(N''[tempdb].[dbo].[#ColumnListing]''))
+	DROP TABLE [dbo].[#ColumnListing]
+
+	CREATE TABLE #ColumnListing
+	(
+	[ColumnListingID] INT IDENTITY(1,1) PRIMARY KEY CLUSTERED,
+	[ColumnIDInTable] INT NOT NULL,
+	[Name] SYSNAME COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	[ColumnIDInIndex] INT NOT NULL,
+	[IsIncludedColumn] BIT NULL
+	)
+
+	INSERT INTO #IndexListing( [TableName], [ObjectID], [IndexName], [IndexID], [IsPrimaryKey], [FILLFACTOR], [FilterDefinition] )
+	SELECT OBJECT_NAME(si.object_id), si.object_id, si.name, si.index_id, si.is_primary_key, si.fill_factor, si.filter_definition
+	FROM sys.indexes si
+	LEFT OUTER JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc ON si.name = tc.CONSTRAINT_NAME AND OBJECT_NAME(si.object_id) = tc.TABLE_NAME
+	WHERE OBJECTPROPERTY(si.object_id, ''IsUserTable'') = 1 AND OBJECT_NAME(si.object_id) <> ''sysdiagrams''
+	ORDER BY OBJECT_NAME(si.object_id), si.index_id
+
+	SELECT @IndexCount = @@ROWCOUNT, @CurrentIndex = 1
+
+	WHILE @CurrentIndex <= @IndexCount
+	BEGIN
+
+	SELECT @idxTableName = [TableName],
+	@idxTableID = [ObjectID],
+	@idxname = [IndexName],
+	@idxid = [IndexID],
+	@IsPrimaryKey = [IsPrimaryKey],
+	@FillFactor = [FILLFACTOR],
+	@FilterDefinition = [FilterDefinition]
+	FROM #IndexListing
+	WHERE [IndexListingID] = @CurrentIndex
+
+	-- So - it is either an index or a constraint
+	-- Check if the index is unique
+	IF (@IsPrimaryKey = 1)
+	BEGIN
+	 SET @sSQL = ''ALTER TABLE [dbo].['' + @idxTableName + ''] ADD CONSTRAINT ['' + @idxname + ''] PRIMARY KEY ''
+	 SET @sDSQL = ''ALTER TABLE [dbo].['' + @idxTableName + ''] DROP CONSTRAINT ['' + @idxname + '']''
+	 -- Check if the index is clustered
+	 IF (INDEXPROPERTY(@idxTableID, @idxname, ''IsClustered'') = 0)
+	 BEGIN
+	 SET @sSQL = @sSQL + ''NON''
+	 SET @IsClustered = 0
+	 END
+	 ELSE
+	 BEGIN
+	 SET @IsClustered = 1
+	 END
+	 SET @sSQL = @sSQL + ''CLUSTERED (''
+	END
+	ELSE
+	BEGIN
+	 SET @sSQL = ''CREATE ''
+	 -- Check if the index is unique
+	 IF (INDEXPROPERTY(@idxTableID, @idxname, ''IsUnique'') = 1)
+	 BEGIN
+	 SET @sSQL = @sSQL + ''UNIQUE ''
+	 END
+	 -- Check if the index is clustered
+	 IF (INDEXPROPERTY(@idxTableID, @idxname, ''IsClustered'') = 1)
+	 BEGIN
+	 SET @sSQL = @sSQL + ''CLUSTERED ''
+	 SET @IsClustered = 1
+	 END
+	 ELSE
+	 BEGIN
+	 SET @IsClustered = 0
+	 END
+
+	 SELECT @sDSQL = ''DROP INDEX ['' + @idxname + ''] ON [dbo].['' + @idxTableName + '']''
+	 SELECT
+	 @sSQL = @sSQL + ''INDEX ['' + @idxname + ''] ON [dbo].['' + @idxTableName + ''] ('',
+	 @colCount = 0
+	END
+
+	-- Get the number of cols in the index
+	SELECT @colCount = COUNT(*)
+	FROM sys.index_columns ic
+	INNER JOIN sys.columns sc ON ic.object_id = sc.object_id AND ic.column_id = sc.column_id
+	WHERE ic.object_id = @idxtableid AND index_id = @idxid --AND ic.is_included_column = 0
+
+	SELECT @colCountWithoutIncludedColumns = COUNT(*)
+	FROM sys.index_columns ic
+	INNER JOIN sys.columns sc ON ic.object_id = sc.object_id AND ic.column_id = sc.column_id
+	WHERE ic.object_id = @idxtableid AND index_id = @idxid AND ic.is_included_column = 0
+
+	-- Get the file group info
+	SELECT @location = f.[name]
+	FROM sys.indexes i
+	INNER JOIN sys.filegroups f ON i.data_space_id = f.data_space_id
+	INNER JOIN sys.all_objects o ON i.[object_id] = o.[object_id]
+	WHERE o.object_id = @idxTableID AND i.index_id = @idxid
+
+	-- Get all columns of the index
+	INSERT INTO #ColumnListing( [ColumnIDInTable], [Name], [ColumnIDInIndex],[IsIncludedColumn] )
+	SELECT sc.column_id, sc.name, ic.index_column_id, ic.is_included_column
+	FROM sys.index_columns ic
+	INNER JOIN sys.columns sc ON ic.object_id = sc.object_id AND ic.column_id = sc.column_id
+	WHERE ic.object_id = @idxTableID AND index_id = @idxid
+	ORDER BY ic.index_column_id
+
+	IF @@ROWCOUNT > 0
+	BEGIN
+
+	SELECT @CurrentCol = 1
+
+	SELECT @IxFirstColumn = 1, @sIncludeCols = '''', @sIndexCols = ''''
+
+	WHILE @CurrentCol <= @ColCount
+	BEGIN
+	SELECT @ColumnIDInTable = ColumnIDInTable,
+	@Name = Name,
+	@ColumnIDInIndex = ColumnIDInIndex,
+	@IsIncludedColumn = IsIncludedColumn
+	FROM #ColumnListing
+	WHERE [ColumnListingID] = @CurrentCol
+
+	IF @IsIncludedColumn = 0
+	BEGIN
+
+	SET @sIndexCols = @sIndexCols + ''['' + @Name + ''] ''
+
+	-- Check the sort order of the index cols ????????
+	IF (INDEXKEY_PROPERTY (@idxTableID,@idxid,@ColumnIDInIndex,''IsDescending'')) = 0
+	BEGIN
+	SET @sIndexCols = @sIndexCols + '' ASC ''
+	END
+	ELSE
+	BEGIN
+	SET @sIndexCols = @sIndexCols + '' DESC ''
+	END
+
+	IF @CurrentCol < @colCountWithoutIncludedColumns
+	BEGIN
+	SET @sIndexCols = @sIndexCols + '', ''
+	END
+
+	END
+	ELSE
+	BEGIN
+	-- Check for any include columns
+	IF LEN(@sIncludeCols) > 0
+	BEGIN
+	SET @sIncludeCols = @sIncludeCols + '',''
+	END
+
+	SET @sIncludeCols = @sIncludeCols + ''['' + @Name + '']''
+
+	END
+
+	SET @CurrentCol = @CurrentCol + 1
+	END
+
+	TRUNCATE TABLE #ColumnListing
+
+	--append to the result
+	IF LEN(@sIncludeCols) > 0
+	 SET @sIndexCols = @sSQL + @sIndexCols + '') '' + '' INCLUDE ( '' + @sIncludeCols + '' ) ''
+	ELSE
+	 SET @sIndexCols = @sSQL + @sIndexCols + '') ''
+
+	-- Add filtering
+	IF @FilterDefinition IS NOT NULL
+	 SET @sFilterSQL = '' WHERE '' + @FilterDefinition + '' ''
+	ELSE
+	 SET @sFilterSQL = ''''
+
+	-- Build the options
+	SET @sParamSQL = ''WITH ( PAD_INDEX = ''
+
+	IF INDEXPROPERTY(@idxTableID, @idxname, ''IsPadIndex'') = 1
+	 SET @sParamSQL = @sParamSQL + ''ON,''
+	ELSE
+	 SET @sParamSQL = @sParamSQL + ''OFF,''
+
+	SET @sParamSQL = @sParamSQL + '' ALLOW_PAGE_LOCKS = ''
+
+
+	IF INDEXPROPERTY(@idxTableID, @idxname, ''IsPageLockDisallowed'') = 0
+	 SET @sParamSQL = @sParamSQL + ''ON,''
+	ELSE
+	 SET @sParamSQL = @sParamSQL + ''OFF,''
+
+	SET @sParamSQL = @sParamSQL + '' ALLOW_ROW_LOCKS = ''
+
+	IF INDEXPROPERTY(@idxTableID, @idxname, ''IsRowLockDisallowed'') = 0
+	SET @sParamSQL = @sParamSQL + ''ON,''
+	ELSE
+	SET @sParamSQL = @sParamSQL + ''OFF,''
+
+
+	SET @sParamSQL = @sParamSQL + '' STATISTICS_NORECOMPUTE = ''
+
+	-- THIS DOES NOT WORK PROPERLY; IsStatistics only says what generated the last set, not what it was set to do.
+	IF (INDEXPROPERTY(@idxTableID, @idxname, ''IsStatistics'') = 1)
+	SET @sParamSQL = @sParamSQL + ''ON''
+	ELSE
+	SET @sParamSQL = @sParamSQL + ''OFF''
+
+	-- Fillfactor 0 is actually not a valid percentage on SQL 2008 R2
+	IF ISNULL( @FillFactor, 90 ) <> 0 
+	 SET @sParamSQL = @sParamSQL + '' ,FILLFACTOR = '' + CAST( ISNULL( @FillFactor, 90 ) AS VARCHAR(3) ) -- + '')''
+
+	/*
+	IF (@IsPrimaryKey = 1) -- DROP_EXISTING isn''t valid for PK''s
+	BEGIN
+	 --SET @sParamSQL = @sParamSQL + '' ) ''
+	END
+	ELSE
+	BEGIN
+	 SET @sParamSQL = @sParamSQL + '' ,DROP_EXISTING = ON ) ''
+	END
+	*/
+
+	SET @sSQL = ''IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = '' + CHAR(39) + @idxname + CHAR(39) + '' AND object_id = OBJECT_ID('' + CHAR(39) + @idxTableName + CHAR(39) + '')) ''  + @sIndexCols + @sFilterSQL + @sParamSQL
+
+	-- 2008 R2 allows ON [filegroup] for primary keys as well, negating the old "IF THE INDEX IS NOT A PRIMARY KEY - ADD THIS - ELSE DO NOT" IsPrimaryKey IF statement
+	SET @sSQL = @sSQL + '') ON ['' + @location + '']''
+
+	--PRINT @sIndexCols + CHAR(13)
+	INSERT INTO #IndexSQL (TableName, IndexName, IsClustered, IsPrimaryKey, IndexCreateSQL, IndexDropSQL) VALUES (@idxTableName, @idxName, @IsClustered, @IsPrimaryKey, @sSQL, @sDSQL)
+
+	END
+
+	SET @CurrentIndex = @CurrentIndex + 1
+	END
+
+	SELECT IndexCreateSQL FROM #IndexSQL
+
+	DROP TABLE #IndexSQL'
+	INSERT INTO @CreateScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	DECLARE @sqltemp NVARCHAR(MAX)
+	SET @sqltemp = REPLACE(@sql, 'SELECT IndexCreateSQL FROM #IndexSQL', 'SELECT IndexDropSQL FROM #IndexSQL')
+
+	-- Drop default constraints
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''ALTER TABLE ['' + schema_name(Tab.schema_id) + ''].['' + OBJECT_NAME(DefCons.parent_object_id) +''] DROP CONSTRAINT [''+DefCons.name+'']''
+	FROM		sys.default_constraints AS DefCons
+	INNER JOIN	sys.columns AS Col ON DefCons.parent_object_id = Col.object_id AND DefCons.parent_column_id = Col.column_id
+	INNER JOIN	sys.tables Tab ON Tab.object_id=Col.OBJECT_ID'
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	SET @sql = 'USE [' + @DBName + '];
+	-- Script out indexes completely, including both PK''s and regular indexes, each clustered or nonclustered.
+	-- DOES NOT HANDLE COMPRESSION; that''s ok, since 2008 R2 RTM benchmarking shows it''s faster and results in smaller indexes to insert uncompressed and then compress later
+	-- HARDCODES [dbo] schema (i.e. it doesn''t say [JohnDoe].[table], changing that to [dbo].[table]
+	-- originally from http://www.sqlservercentral.com/Forums/Topic961088-2753-2.aspx
+
+	DECLARE
+	@idxTableName SYSNAME,
+	@idxTableID INT,
+	@idxname SYSNAME,
+	@idxid INT,
+	@colCount INT,
+	@IxColumn SYSNAME,
+	@IxFirstColumn BIT,
+	@ColumnIDInTable INT,
+	@ColumnIDInIndex INT,
+	@IsIncludedColumn INT,
+	@sIncludeCols NVARCHAR(MAX),
+	@sIndexCols NVARCHAR(MAX),
+	@sSQL NVARCHAR(MAX),
+	@sDSQL NVARCHAR(MAX),
+	@sParamSQL NVARCHAR(MAX),
+	@sFilterSQL NVARCHAR(MAX),
+	@location SYSNAME,
+	@IndexCount INT,
+	@CurrentIndex INT,
+	@CurrentCol INT,
+	@Name VARCHAR(128),
+	@IsPrimaryKey TINYINT,
+	@Fillfactor INT,
+	@FilterDefinition NVARCHAR(MAX),
+	@IsClustered BIT -- used solely for putting information into the result table
+
+
+	IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects WHERE id = object_id(N''[tempdb].[dbo].[#IndexSQL]''))
+	DROP TABLE [dbo].[#IndexSQL]
+
+	CREATE TABLE #IndexSQL
+	( TableName NVARCHAR(128) NOT NULL
+	 ,IndexName NVARCHAR(128) NOT NULL
+	 ,IsClustered BIT NOT NULL
+	 ,IsPrimaryKey BIT NOT NULL
+	 ,IndexCreateSQL NVARCHAR(max) NOT NULL
+	 ,IndexDropSQL NVARCHAR(MAX) NOT NULL
+	)
+
+	IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects WHERE id = object_id(N''[tempdb].[dbo].[#IndexListing]''))
+	DROP TABLE [dbo].[#IndexListing]
+
+	CREATE TABLE #IndexListing
+	(
+	[IndexListingID] INT IDENTITY(1,1) PRIMARY KEY CLUSTERED,
+	[TableName] SYSNAME COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	[ObjectID] INT NOT NULL,
+	[IndexName] SYSNAME COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	[IndexID] INT NOT NULL,
+	[IsPrimaryKey] TINYINT NOT NULL,
+	[FillFactor] INT,
+	[FilterDefinition] NVARCHAR(MAX) NULL
+	)
+
+	IF EXISTS (SELECT * FROM tempdb.dbo.sysobjects WHERE id = object_id(N''[tempdb].[dbo].[#ColumnListing]''))
+	DROP TABLE [dbo].[#ColumnListing]
+
+	CREATE TABLE #ColumnListing
+	(
+	[ColumnListingID] INT IDENTITY(1,1) PRIMARY KEY CLUSTERED,
+	[ColumnIDInTable] INT NOT NULL,
+	[Name] SYSNAME COLLATE SQL_Latin1_General_CP1_CI_AS NULL,
+	[ColumnIDInIndex] INT NOT NULL,
+	[IsIncludedColumn] BIT NULL
+	)
+
+	INSERT INTO #IndexListing( [TableName], [ObjectID], [IndexName], [IndexID], [IsPrimaryKey], [FILLFACTOR], [FilterDefinition] )
+	SELECT OBJECT_NAME(si.object_id), si.object_id, si.name, si.index_id, si.is_primary_key, si.fill_factor, si.filter_definition
+	FROM sys.indexes si
+	LEFT OUTER JOIN INFORMATION_SCHEMA.TABLE_CONSTRAINTS tc ON si.name = tc.CONSTRAINT_NAME AND OBJECT_NAME(si.object_id) = tc.TABLE_NAME
+	WHERE OBJECTPROPERTY(si.object_id, ''IsUserTable'') = 1 AND OBJECT_NAME(si.object_id) <> ''sysdiagrams''
+	ORDER BY OBJECT_NAME(si.object_id), si.index_id
+
+	SELECT @IndexCount = @@ROWCOUNT, @CurrentIndex = 1
+
+	WHILE @CurrentIndex <= @IndexCount
+	BEGIN
+
+	SELECT @idxTableName = [TableName],
+	@idxTableID = [ObjectID],
+	@idxname = [IndexName],
+	@idxid = [IndexID],
+	@IsPrimaryKey = [IsPrimaryKey],
+	@FillFactor = [FILLFACTOR],
+	@FilterDefinition = [FilterDefinition]
+	FROM #IndexListing
+	WHERE [IndexListingID] = @CurrentIndex
+
+	-- So - it is either an index or a constraint
+	-- Check if the index is unique
+	IF (@IsPrimaryKey = 1)
+	BEGIN
+	 SET @sSQL = ''ALTER TABLE [dbo].['' + @idxTableName + ''] ADD CONSTRAINT ['' + @idxname + ''] PRIMARY KEY ''
+	 SET @sDSQL = ''IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = '' + CHAR(39) + @idxname + CHAR(39) + '' AND object_id = OBJECT_ID('' + CHAR(39) + @idxTableName + CHAR(39) + '')) ALTER TABLE [dbo].['' + @idxTableName + ''] DROP CONSTRAINT ['' + @idxname + '']''
+	 -- Check if the index is clustered
+	 IF (INDEXPROPERTY(@idxTableID, @idxname, ''IsClustered'') = 0)
+	 BEGIN
+	 SET @sSQL = @sSQL + ''NON''
+	 SET @IsClustered = 0
+	 END
+	 ELSE
+	 BEGIN
+	 SET @IsClustered = 1
+	 END
+	 SET @sSQL = @sSQL + ''CLUSTERED (''
+	END
+	ELSE
+	BEGIN
+	 SET @sSQL = ''CREATE ''
+	 -- Check if the index is unique
+	 IF (INDEXPROPERTY(@idxTableID, @idxname, ''IsUnique'') = 1)
+	 BEGIN
+	 SET @sSQL = @sSQL + ''UNIQUE ''
+	 END
+	 -- Check if the index is clustered
+	 IF (INDEXPROPERTY(@idxTableID, @idxname, ''IsClustered'') = 1)
+	 BEGIN
+	 SET @sSQL = @sSQL + ''CLUSTERED ''
+	 SET @IsClustered = 1
+	 END
+	 ELSE
+	 BEGIN
+	 SET @IsClustered = 0
+	 END
+
+	 SELECT @sDSQL = ''IF EXISTS (SELECT 1 FROM sys.indexes WHERE name = '' + CHAR(39) + @idxname + CHAR(39) + '' AND object_id = OBJECT_ID('' + CHAR(39) + @idxTableName + CHAR(39) + '')) DROP INDEX ['' + @idxname + ''] ON [dbo].['' + @idxTableName + '']''
+	 SELECT
+	 @sSQL = @sSQL + ''INDEX ['' + @idxname + ''] ON [dbo].['' + @idxTableName + ''] ('',
+	 @colCount = 0
+	END
+
+	-- Get the number of cols in the index
+	SELECT @colCount = COUNT(*)
+	FROM sys.index_columns ic
+	INNER JOIN sys.columns sc ON ic.object_id = sc.object_id AND ic.column_id = sc.column_id
+	WHERE ic.object_id = @idxtableid AND index_id = @idxid AND ic.is_included_column = 0
+
+	-- Get the file group info
+	SELECT @location = f.[name]
+	FROM sys.indexes i
+	INNER JOIN sys.filegroups f ON i.data_space_id = f.data_space_id
+	INNER JOIN sys.all_objects o ON i.[object_id] = o.[object_id]
+	WHERE o.object_id = @idxTableID AND i.index_id = @idxid
+
+	-- Get all columns of the index
+	INSERT INTO #ColumnListing( [ColumnIDInTable], [Name], [ColumnIDInIndex],[IsIncludedColumn] )
+	SELECT sc.column_id, sc.name, ic.index_column_id, ic.is_included_column
+	FROM sys.index_columns ic
+	INNER JOIN sys.columns sc ON ic.object_id = sc.object_id AND ic.column_id = sc.column_id
+	WHERE ic.object_id = @idxTableID AND index_id = @idxid
+	ORDER BY ic.index_column_id
+
+	IF @@ROWCOUNT > 0
+	BEGIN
+
+	SELECT @CurrentCol = 1
+
+	SELECT @IxFirstColumn = 1, @sIncludeCols = '''', @sIndexCols = ''''
+
+	WHILE @CurrentCol <= @ColCount
+	BEGIN
+	SELECT @ColumnIDInTable = ColumnIDInTable,
+	@Name = Name,
+	@ColumnIDInIndex = ColumnIDInIndex,
+	@IsIncludedColumn = IsIncludedColumn
+	FROM #ColumnListing
+	WHERE [ColumnListingID] = @CurrentCol
+
+	IF @IsIncludedColumn = 0
+	BEGIN
+
+	SET @sIndexCols = @sIndexCols + ''['' + @Name + ''] ''
+
+	-- Check the sort order of the index cols ????????
+	IF (INDEXKEY_PROPERTY (@idxTableID,@idxid,@ColumnIDInIndex,''IsDescending'')) = 0
+	BEGIN
+	SET @sIndexCols = @sIndexCols + '' ASC ''
+	END
+	ELSE
+	BEGIN
+	SET @sIndexCols = @sIndexCols + '' DESC ''
+	END
+
+	IF @CurrentCol < @colCount
+	BEGIN
+	SET @sIndexCols = @sIndexCols + '', ''
+	END
+
+	END
+	ELSE
+	BEGIN
+	-- Check for any include columns
+	IF LEN(@sIncludeCols) > 0
+	BEGIN
+	SET @sIncludeCols = @sIncludeCols + '',''
+	END
+
+	SET @sIncludeCols = @sIncludeCols + ''['' + @IxColumn + '']''
+
+	END
+
+	SET @CurrentCol = @CurrentCol + 1
+	END
+
+	TRUNCATE TABLE #ColumnListing
+
+	--append to the result
+	IF LEN(@sIncludeCols) > 0
+	 SET @sIndexCols = @sSQL + @sIndexCols + '') '' + '' INCLUDE ( '' + @sIncludeCols + '' ) ''
+	ELSE
+	 SET @sIndexCols = @sSQL + @sIndexCols + '') ''
+
+	-- Add filtering
+	IF @FilterDefinition IS NOT NULL
+	 SET @sFilterSQL = '' WHERE '' + @FilterDefinition + '' ''
+	ELSE
+	 SET @sFilterSQL = ''''
+
+	-- Build the options
+	SET @sParamSQL = ''WITH ( PAD_INDEX = ''
+
+	IF INDEXPROPERTY(@idxTableID, @idxname, ''IsPadIndex'') = 1
+	 SET @sParamSQL = @sParamSQL + ''ON,''
+	ELSE
+	 SET @sParamSQL = @sParamSQL + ''OFF,''
+
+	SET @sParamSQL = @sParamSQL + '' ALLOW_PAGE_LOCKS = ''
+
+
+	IF INDEXPROPERTY(@idxTableID, @idxname, ''IsPageLockDisallowed'') = 0
+	 SET @sParamSQL = @sParamSQL + ''ON,''
+	ELSE
+	 SET @sParamSQL = @sParamSQL + ''OFF,''
+
+	SET @sParamSQL = @sParamSQL + '' ALLOW_ROW_LOCKS = ''
+
+	IF INDEXPROPERTY(@idxTableID, @idxname, ''IsRowLockDisallowed'') = 0
+	SET @sParamSQL = @sParamSQL + ''ON,''
+	ELSE
+	SET @sParamSQL = @sParamSQL + ''OFF,''
+
+
+	SET @sParamSQL = @sParamSQL + '' STATISTICS_NORECOMPUTE = ''
+
+	-- THIS DOES NOT WORK PROPERLY; IsStatistics only says what generated the last set, not what it was set to do.
+	IF (INDEXPROPERTY(@idxTableID, @idxname, ''IsStatistics'') = 1)
+	SET @sParamSQL = @sParamSQL + ''ON''
+	ELSE
+	SET @sParamSQL = @sParamSQL + ''OFF''
+
+	-- Fillfactor 0 is actually not a valid percentage on SQL 2008 R2
+	IF ISNULL( @FillFactor, 90 ) <> 0 
+	 SET @sParamSQL = @sParamSQL + '' ,FILLFACTOR = '' + CAST( ISNULL( @FillFactor, 90 ) AS VARCHAR(3) ) -- + '')''
+
+	/*
+	IF (@IsPrimaryKey = 1) -- DROP_EXISTING isn''t valid for PK''s
+	BEGIN
+	 --SET @sParamSQL = @sParamSQL + '' ) ''
+	END
+	ELSE
+	BEGIN
+	 SET @sParamSQL = @sParamSQL + '' ,DROP_EXISTING = ON ) ''
+	END
+	*/
+
+	SET @sSQL = @sIndexCols + @sFilterSQL + @sParamSQL
+
+	-- 2008 R2 allows ON [filegroup] for primary keys as well, negating the old "IF THE INDEX IS NOT A PRIMARY KEY - ADD THIS - ELSE DO NOT" IsPrimaryKey IF statement
+	SET @sSQL = @sSQL + '' ON ['' + @location + '']''
+
+	--PRINT @sIndexCols + CHAR(13)
+	INSERT INTO #IndexSQL (TableName, IndexName, IsClustered, IsPrimaryKey, IndexCreateSQL, IndexDropSQL) VALUES (@idxTableName, @idxName, @IsClustered, @IsPrimaryKey, @sSQL, @sDSQL)
+
+	END
+
+	SET @CurrentIndex = @CurrentIndex + 1
+	END
+
+	SELECT IndexDropSQL FROM #IndexSQL
+
+	DROP TABLE #IndexSQL'
+
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Drop check constraints
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''IF EXISTS (SELECT OBJECT_ID('' + QUOTENAME(DefCons.name, CHAR(39)) + '', '' + CHAR(39) + ''C'' + CHAR(39) + '') FROM INFORMATION_SCHEMA.CHECK_CONSTRAINTS) ALTER TABLE ['' + schema_name(Tab.schema_id) + ''].['' + OBJECT_NAME(DefCons.parent_object_id) +''] DROP CONSTRAINT [''+DefCons.name+'']''
+	FROM		sys.default_constraints AS DefCons
+	INNER JOIN	sys.columns AS Col ON DefCons.parent_object_id = Col.object_id AND DefCons.parent_column_id = Col.column_id
+	INNER JOIN	sys.tables Tab ON Tab.object_id=Col.OBJECT_ID'
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Recreate UDF's
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT m.definition
+	FROM sys.sql_modules AS m INNER JOIN sys.objects AS o ON m.[object_id] = o.[object_id] WHERE o.type IN (''FN'', ''IF'', ''TF'')'
+	INSERT INTO @CreateScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Add computed columns
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''ALTER TABLE ['' + OBJECT_NAME(c.object_id) + ''] ADD ['' + c.name + ''] AS '' + c.definition
+	FROM		sys.computed_columns c'
+	INSERT INTO @CreateScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Drop computed columns
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''ALTER TABLE ['' + OBJECT_NAME(c.object_id) + ''] DROP COLUMN ['' + c.name + '']''
+	FROM		sys.computed_columns c'
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Script collation change at column level for every (N)CHAR, (N)VARCHAR and (N)TEXT columns
+	SET @sql = 'USE [' + @DBName + ']; 
+	DECLARE @TableName NVARCHAR(255),
+			@CollationName NVARCHAR(255),
+			@ColumnName NVARCHAR(255),
+			@DataType NVARCHAR(255),
+			@CharacterMaxLen NVARCHAR(255),
+			@IsNullable NVARCHAR(255),
+			@SQLText NVARCHAR(4000)
+
+	DECLARE @Results TABLE (SQLStatement NVARCHAR(4000))
+
+	DECLARE MyTableCursor Cursor FOR
+	SELECT name FROM sys.tables WHERE [type] = ''U'' and name <> ''sysdiagrams'' ORDER BY name 
+
+	OPEN MyTableCursor
+	SET @CollationName = ''' + @NewCollation + '''
+
+	FETCH NEXT FROM MyTableCursor INTO @TableName
+	WHILE @@FETCH_STATUS = 0
+		BEGIN
+			DECLARE MyColumnCursor Cursor
+			FOR 
+			SELECT c.COLUMN_NAME, c.DATA_TYPE, c.CHARACTER_MAXIMUM_LENGTH, c.IS_NULLABLE from INFORMATION_SCHEMA.COLUMNS c
+				WHERE c.TABLE_NAME = @TableName AND (c.DATA_TYPE LIKE ''%char%'' OR c.DATA_TYPE LIKE ''%text%'') AND c.COLLATION_NAME <> @CollationName
+				AND NOT EXISTS (SELECT co.column_id FROM sys.computed_columns co WHERE co.object_id = OBJECT_ID(@TableName) AND co.name = c.COLUMN_NAME)
+				ORDER BY c.ORDINAL_POSITION
+			Open MyColumnCursor
+
+			FETCH NEXT FROM MyColumnCursor INTO @ColumnName, @DataType, @CharacterMaxLen, @IsNullable
+			WHILE @@FETCH_STATUS = 0
+				BEGIN
+				SET @SQLText = ''ALTER TABLE '' + @TableName + '' ALTER COLUMN ['' + @ColumnName + ''] '' + @DataType + CASE WHEN @DataType <> ''text'' THEN ''('' + CASE WHEN @CharacterMaxLen = -1 THEN ''MAX'' ELSE @CharacterMaxLen END + '')'' ELSE '''' END + '' COLLATE '' + @CollationName + '' '' + CASE WHEN @IsNullable = ''NO'' THEN ''NOT NULL'' ELSE ''NULL'' END
+				INSERT INTO @Results SELECT @SQLText
+				FETCH NEXT FROM MyColumnCursor INTO @ColumnName, @DataType, @CharacterMaxLen, @IsNullable
+			END
+			CLOSE MyColumnCursor
+			DEALLOCATE MyColumnCursor
+
+	FETCH NEXT FROM MyTableCursor INTO @TableName
+	END
+	CLOSE MyTableCursor
+	DEALLOCATE MyTableCursor
+	
+	SELECT * FROM @Results'
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Drop UDF's
+  	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT ''IF EXISTS (SELECT o.name FROM sys.sql_modules AS m INNER JOIN sys.objects AS o ON m.[object_id] = o.[object_id] WHERE o.type IN (''''FN'''', ''''IF'''', ''''TF'''') AND o.name = '' + QUOTENAME(o.NAME, CHAR(39)) + '') DROP FUNCTION ['' + SCHEMA_NAME(o.schema_id) + ''].['' + o.NAME + '']''
+	FROM sys.sql_modules AS m INNER JOIN sys.objects AS o ON m.[object_id] = o.[object_id] WHERE o.type IN (''FN'', ''IF'', ''TF'')'
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Drop views
+  	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT ''IF EXISTS (SELECT o.name FROM sys.sql_modules AS m INNER JOIN sys.objects AS o ON m.[object_id] = o.[object_id] WHERE o.type IN (''''V'''') AND o.name = '' + QUOTENAME(o.NAME, CHAR(39)) + '') DROP VIEW ['' + SCHEMA_NAME(o.schema_id) + ''].['' + o.NAME + '']''
+	FROM sys.sql_modules AS m INNER JOIN sys.objects AS o ON m.[object_id] = o.[object_id] WHERE o.type IN (''V'')'
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Change collation at database level
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT		''ALTER DATABASE [' + @DBName + '] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; 
+ALTER DATABASE [' + @DBName + '] COLLATE ' + @NewCollation + '; 
+ALTER DATABASE [' + @DBName + '] SET MULTI_USER'''
+	INSERT INTO @DropScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Recreate views
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT m.definition
+	FROM sys.sql_modules AS m INNER JOIN sys.objects AS o ON m.[object_id] = o.[object_id] WHERE o.type IN (''V'')'
+	INSERT INTO @CreateScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	-- Recreate permissions
+	SET @sql = 'USE [' + @DBName + ']; 
+	SELECT ''GRANT '' + dp.permission_name collate ' + @NewCollation + '
+    + '' ON '' + s.name + ''.'' + o.name + '' TO ['' + dpr.name + '']''
+    FROM sys.database_permissions AS dp
+    INNER JOIN sys.objects AS o ON dp.major_id=o.object_id
+    INNER JOIN sys.schemas AS s ON o.schema_id = s.schema_id
+    INNER JOIN sys.database_principals AS dpr ON dp.grantee_principal_id=dpr.principal_id
+    WHERE dpr.name NOT IN (''guest'')'
+	INSERT INTO @CreateScripts (SQLStatement)
+	EXEC sp_executesql @sql
+
+	IF @JustPrintStatements = 1
+	BEGIN
+		-- Just return recordset of statements that need to be executed to change collation, drop statements first followed by creation statements
+		SELECT SQLStatement FROM @DropScripts GROUP BY SQLStatement ORDER BY MIN(ID)
+		SELECT SQLStatement FROM @CreateScripts GROUP BY SQLStatement ORDER BY MIN(ID)
+	END
+	ELSE
+	BEGIN
+		-- Execute SQL statements in dependency order
+		DECLARE SQLStatements CURSOR FOR
+		SELECT SQLStatement FROM @DropScripts GROUP BY SQLStatement ORDER BY MIN(ID)
+		OPEN SQLStatements
+		FETCH NEXT FROM SQLStatements INTO @sql
+		WHILE @@FETCH_STATUS = 0
+		BEGIN
+			SET @bigsql = 'USE [' + @dbname + ']; EXEC (' + CHAR(39) + REPLACE(@sql, CHAR(39), CHAR(39) + CHAR(39)) + CHAR(39) + ')'
+			IF @DebugPrintSQL = 1 PRINT @bigsql
+			EXEC sp_executesql @bigsql
+			FETCH NEXT FROM SQLStatements INTO @sql
+		END
+		CLOSE SQLStatements
+		DEALLOCATE SQLStatements
+
+		DECLARE SQLStatements CURSOR FOR
+		SELECT SQLStatement FROM @CreateScripts GROUP BY SQLStatement ORDER BY MIN(ID)
+		OPEN SQLStatements
+		FETCH NEXT FROM SQLStatements INTO @sql
+		WHILE @@FETCH_STATUS = 0
+		BEGIN
+			SET @bigsql = 'USE [' + @dbname + ']; EXEC (' + CHAR(39) + REPLACE(@sql, CHAR(39), CHAR(39) + CHAR(39)) + CHAR(39) + ')'
+			IF @DebugPrintSQL = 1 PRINT @bigsql
+			EXEC (@bigsql)
+			FETCH NEXT FROM SQLStatements INTO @sql
+		END
+		CLOSE SQLStatements
+		DEALLOCATE SQLStatements
+	END
+
+	-- Tidy up - remove stored procedures created
+	SET @sql = REPLACE('IF EXISTS (SELECT * FROM sys.objects WHERE type = ''P'' AND name = ''ScriptDropTableKeys'') DROP PROCEDURE ScriptDropTableKeys', CHAR(39), CHAR(39)+CHAR(39))
+	SET @bigsql = 'USE [' + @DBName + ']; EXEC sp_executesql N''' + @sql + '''';
+	EXEC (@bigsql)
+	SET @sql = 'IF EXISTS (SELECT * FROM sys.objects WHERE type = ''P'' AND name = ''ScriptCreateTableKeys'') DROP PROCEDURE ScriptCreateTableKeys'
+	SET @bigsql = 'USE [' + @DBName + ']; EXEC sp_executesql N''' + REPLACE(@sql, CHAR(39), CHAR(39)+CHAR(39)) + ''''
+	EXEC (@bigsql)
+END
