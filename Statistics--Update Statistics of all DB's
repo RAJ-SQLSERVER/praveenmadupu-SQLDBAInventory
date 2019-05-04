@@ -1,0 +1,108 @@
+--Update Statistics for databases where you have access
+The code will crawl through the list of databases where you have access and also have "Alter" permissions, 
+running Update Statistics on each table of each database.  System database are skipped. Note that this uses 
+the undocumented procedure "sp_MSforeachtable"
+
+With data management folks understandably skittish about unauthorized access by even FTE staff, 
+you had better get the manager's permission before running this, even if you have the technical rights.
+
+USE [DBMaint]
+GO
+DECLARE @return_value int
+EXEC @return_value = [dbo].[UpdateStatsForAllDBS]
+SELECT 'Return Value' = @return_value
+GO 
+=========================================================
+USE [DBMaint]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF Not  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[UpdateStatsForAllDBS]') AND type in (N'P', N'PC'))
+BEGIN
+EXEC dbo.sp_executesql @statement = N'
+create procedure [dbo].[UpdateStatsForAllDBS]
+as 
+/*
+
+Date		Name					Version
+10/1/2014	Christopher Petrich		Original
+
+Run this stored procudure to update statistics for those SQL Server databases where you have permission
+
+USE [DBMaint]
+GO
+
+DECLARE	@return_value int
+
+EXEC	@return_value = [dbo].[UpdateStatsForAllDBS]
+
+SELECT	''Return Value'' = @return_value
+
+GO
+
+*/
+IF OBJECT_ID (''tempdb..##perms'') IS NOT NULL
+	BEGIN
+		DROP TABLE ##perms;
+	END;
+
+CREATE TABLE ##perms
+([DBname]			sysname NULL
+, [EntityName]		sysname NULL
+, [SubEntityName]		sysname NULL
+, [PermissionName]	sysname NULL) ;
+
+EXEC sp_MSforeachdb ''use ?; insert into ##perms  (DBname ,EntityName ,SubEntityName ,PermissionName) SELECT db_name() DBName ,*  FROM fn_my_permissions (NULL, ''''database'''')'';
+
+SELECT DISTINCT [DBname]
+	   FROM ##perms;
+
+SELECT DISTINCT [name]
+	   FROM sysdatabases sdb
+			JOIN ##perms prm
+				ON sdb.name = prm.DBname
+	   WHERE [sdb].[dbid] > 4
+		 AND HAS_DBACCESS ([name]) = 1
+		 AND [PermissionName] LIKE ''Alter%'';
+
+DECLARE
+   @DBName sysname
+ , @sql nvarchar (max) ;
+DECLARE DBCursor CURSOR
+	FOR
+		SELECT DISTINCT [name]
+			   FROM sysdatabases sdb
+					JOIN ##perms prm
+						ON sdb.name = prm.DBname
+			   WHERE [sdb].[dbid] > 4
+				 AND HAS_DBACCESS ([name]) = 1
+				 AND [PermissionName] LIKE ''Alter%'';
+
+OPEN DBCursor;
+FETCH NEXT FROM DBCursor INTO @DBName;
+
+WHILE @@FETCH_STATUS = 0
+	BEGIN
+		SELECT @sql = ''USE ['' + @DBName + '']; exec sp_MSforeachtable ''''UPDATE STATISTICS ?;'''''';
+		PRINT @sql;
+		EXEC (@sql) ;
+
+		FETCH NEXT FROM DBCursor INTO @DBName;
+	END;
+
+CLOSE DBCursor;
+DEALLOCATE DBCursor;
+
+IF OBJECT_ID (''tempdb..##perms'') IS NOT NULL
+	BEGIN
+		DROP TABLE ##perms;
+	END;
+
+ ' 
+END
+GO
