@@ -1,0 +1,67 @@
+--Restore script genrator for moving dbs
+--Run the script from query analyser on the source server. 
+--Remember to change query results to text and also remove include column headers option from query options. 
+--If filepaths are different on source and destination just do a find and replace on file path. 
+--copy the output of query and run it on destination and you are done
+=======================================================================
+set nocount on 
+declare @count int,
+@total int,
+@dbname sysname,
+@numoffiles int
+
+
+declare @databaseList Table 
+(id int identity (1,1),
+dbname sysname)
+ 
+
+insert into @databaseList
+select name from sys.databases
+where name not in ('master','model','tempdb','msdb')
+
+select @total = count(*) from @databaseList
+set @count=1
+
+while @count <=@total
+begin
+	
+	select @dbname=dbname from @databaseList where id=@count
+
+	select @numoffiles = count(*) from master..sysaltfiles
+	where dbid= db_id (@dbname)
+
+	select 'Resotre command for database ' +@dbname
+	select '-----------------------------'
+
+	declare @count2 int
+
+	set @count2 = 1
+
+	while @count2 <= @numoffiles
+	begin
+		
+		if @count2=1
+		Begin
+		select 'Restore database ' +@dbname + ' From disk= ''H:\cscdba_sqlbu\Archived\UserDB\Restore\ .bak''
+		with move ''' +name + ''' to ''' + filename + ''''
+		from master..sysaltfiles
+		where dbid=DB_ID(@dbname)
+		and fileid=@count2
+		end
+
+		else
+		begin 
+			select 'move ''' +name+ ''' to ''' + filename + ''''
+			from master..sysaltfiles
+			where dbid=DB_ID(@dbname)
+			and fileid=@count2
+		end
+		
+		set @count2 =@count2 +1
+
+	end
+
+
+	set @count=@count+1
+End
