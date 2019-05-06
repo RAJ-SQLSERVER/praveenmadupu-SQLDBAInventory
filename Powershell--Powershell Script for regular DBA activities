@@ -1,0 +1,24 @@
+--Powershell--Powershell Script for regular DBA activities
+--https://www.sqlservercentral.com/scripts/powershell-script-for-regular-dba-activities
+Most of the time, the developers come to the DBA for some routine tasks like Sql Backups and restore for different development
+and testing environments. This requires DBA to manually perform these operations via SSMS. Sometimes the operation is straight forward, 
+while most of the times we have to configure some advanced options for our operations.
+
+This small powershell utility takes care of such operations and elegantly performs it via command shell without SSMS interaction.
+
+Such utilities can be easily used by the developers in the team without making them approach to DBA for such tasks on various development 
+or testing environments.
+
+Please note, this tool supports below operations on the same Sql Server machine : 
+
+1.      Backup a DB to a physical .bak file
+
+2.      Restore a DB from a .bak file
+
+3.      Restore a DB from a DB
+
+4.      Create a new DB from existing DB
+
+Below is the working of this utility explained:
+
+--https://www.sqlservercentral.com/scripts/powershell-script-for-regular-dba-activities
