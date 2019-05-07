@@ -1,0 +1,93 @@
+--Backup all SSAS databases using TSQL
+This script enumerates all SSAS databases and backups them using a MSOLAP linked server.
+Especially usefull if your BI dudes don't allways tell the DBA they added a new SSAS database, but *do* expect that everyting is allways backed up!
+Usage: 
+Set the backup path to your desired location (line 15)
+Replace the <YourServerName> stub, and run the commented part of the script once (between /* and */) , this will setup a linked server for the XMLA script
+And thats it, hit F5 and see the .abf files apearing 🙂
+After that you can tweak it to your specific situation, have datetime stamps, etc.
+==========================================
+ -- ********************************************************************************* 
+-- Name			: Backup all SSAS databases 
+-- Description 	: Enumerates and backups all SSAS databases using MSOLAP linked server
+-- Used By		: Backup all job
+-- Author		: Theo Ekelmans
+-- Version/Date	: 1.0, 2012-03-13
+-- **********************************************************************************
+
+DECLARE @name VARCHAR(50) -- Cube name  
+DECLARE @path VARCHAR(256) -- Backup path
+DECLARE @fileName VARCHAR(256) -- Backup filename 
+DECLARE @DT VARCHAR(20) -- Used for optional file name timestamp
+Declare @XMLA nvarchar(4000) -- The SSAS command in XML format
+
+SET @path = 'B:\SQL_backup\' + @@SERVERNAME + '\' -- Do not forget to add on the closing backslash !!!
+
+/*
+-- Setup a linked server first: replace <YourServerName> for your servername
+
+USE [master]
+
+EXEC master.dbo.sp_addlinkedserver @server = N'<YourServerName>-SSAS', @srvproduct=N'', @provider=N'MSOLAP', @datasrc=N'localhost'
+EXEC master.dbo.sp_addlinkedsrvlogin @rmtsrvname=N'<YourServerName>-SSAS',@useself=N'False',@locallogin=NULL,@rmtuser=NULL,@rmtpassword=NULL
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'collation compatible', @optvalue=N'false'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'data access', @optvalue=N'true'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'dist', @optvalue=N'false'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'pub', @optvalue=N'false'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'rpc', @optvalue=N'true'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'rpc out', @optvalue=N'true'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'sub', @optvalue=N'false'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'connect timeout', @optvalue=N'0'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'collation name', @optvalue=null
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'lazy schema validation', @optvalue=N'false'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'query timeout', @optvalue=N'0'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'use remote collation', @optvalue=N'true'
+EXEC master.dbo.sp_serveroption @server=N'<YourServerName>-SSAS', @optname=N'remote proc transaction promotion', @optvalue=N'true'
+
+*/
+
+-- Change timestamp to this format: _YYYY-MM-DD_HHMMSS
+Set @DT = '_' + Replace(Replace(Convert(nvarchar, getdate(), 120), ':', ''), ' ', '_');
+
+DECLARE curCube CURSOR FOR  
+SELECT CATALOG_NAME 
+FROM openquery([<YourServerName>-SSAS], 'SELECT [CATALOG_NAME] FROM $SYSTEM.DBSCHEMA_CATALOGS') as a
+
+OPEN curCube   
+FETCH NEXT FROM curCube INTO @name   
+
+WHILE @@FETCH_STATUS = 0   
+BEGIN   
+
+
+
+	-- Create the XMLA string (overwrites the same files again and again)
+	Set @XMLA = N'
+	<Backup xmlns="http://schemas.microsoft.com/analysisservices/2003/engine">
+		<Object>
+		<DatabaseID>' + @name + '</DatabaseID>
+		</Object>
+		<File>' + @path + @name + '.abf</File>
+		<AllowOverwrite>true</AllowOverwrite>
+	</Backup>
+	';	
+
+	-- Create the XMLA string (add a DT stamp to the filename)
+	-- Set @XMLA = N'
+	-- <Backup xmlns="http://schemas.microsoft.com/analysisservices/2003/engine">
+	-- 	<Object>
+	-- 	<DatabaseID>' + @name + '</DatabaseID>
+	-- 	</Object>
+	-- 	<File>' + @path + @name + @DT + '.abf</File>
+	-- 	<AllowOverwrite>true</AllowOverwrite>
+	-- </Backup>
+	-- ';
+
+	-- Execute the string across the linked server (SSAS)
+	Exec (@XMLA) At [<YourServerName>-SSAS]
+
+	FETCH NEXT FROM curCube INTO @name   
+END   
+
+CLOSE curCube   
+DEALLOCATE curCube
