@@ -1,0 +1,73 @@
+--Index--Missing Index Notification Mail
+
+
+ DECLARE @email_profile_name VARCHAR(100);
+DECLARE @email_recipients VARCHAR(100);
+set @email_profile_name = '<email profile name>' ; 
+set @email_recipients = '<email recipients>';
+
+If(OBJECT_ID('tempdb..#TempMissingIndex') Is Not Null)
+Begin
+    Drop Table #TempMissingIndex
+End
+
+create table #TempMissingIndex
+(
+    index_advantage int, 
+    DB_info Varchar(350),
+	Equality_columns Varchar(350),
+    Inequality_columns Varchar(350),
+	Included_columns Varchar(350)
+)
+
+EXEC sp_MSforeachdb '
+IF ''?'' NOT IN(''master'',''tempdb'',''msdb'', ''model'')
+BEGIN
+
+USE [?];
+Insert into #TempmissingIndex
+SELECT 
+	user_seeks * avg_total_user_cost * ( avg_user_impact * 0.01 ) AS [index_advantage] ,
+	dbmid.[statement] AS [Database.Schema.Table] ,
+	dbmid.equality_columns ,
+	dbmid.inequality_columns ,
+	dbmid.included_columns
+FROM sys.dm_db_missing_index_group_stats AS dbmigs WITH ( NOLOCK )
+INNER JOIN sys.dm_db_missing_index_groups AS dbmig WITH ( NOLOCK ) ON dbmigs.group_handle = dbmig.index_group_handle
+INNER JOIN sys.dm_db_missing_index_details AS dbmid WITH ( NOLOCK ) ON dbmig.index_handle = dbmid.index_handle
+WHERE dbmid.[database_id] = DB_ID()
+and (user_seeks * avg_total_user_cost * ( avg_user_impact * 0.01 )) > 50000
+ORDER BY index_advantage DESC ;
+END';
+
+IF EXISTS (SELECT * FROM #TempMissingIndex)
+begin
+
+DECLARE @tableHTML  NVARCHAR(MAX);
+SET @tableHTML =
+    N'<h1>Missing Index</h1>'
+  + N'<table border="1">'
+  + N'<tr><th>index_advantage</th><th>DB_info</th><th>Equality_columns</th><th>Inequality_columns</th><th>Included_columns</th></tr>'
+  + CAST ( 
+			(  Select 
+                   td = [PP].[index_advantage]	, ''
+				 , td = [PP].[DB_info]		, ''
+				 , td = [PP].[Equality_columns] 	, ''
+				 , td = [PP].[Inequality_columns]	, ''	
+				,  td = [PP].[Included_columns]
+				FROM #TempMissingIndex PP
+				FOR XML PATH('tr'), TYPE
+			) AS NVARCHAR(MAX)
+		)
+  + N'</table>';
+
+
+EXEC msdb.dbo.sp_send_dbmail
+	@profile_name =@email_profile_name ,
+	@recipients = @email_recipients ,
+	@subject = 'Report',
+	@body = @tableHTML,
+	@body_format = 'HTML';
+
+END;
+Drop Table #TempMissingIndex
