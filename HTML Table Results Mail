@@ -1,0 +1,109 @@
+--HTML Table Results Mail
+--https://www.sqlservercentral.com/scripts/html-table-results-for-email
+This stored procedure will take a pre-defined view, table or temp table and return the results as an HTML table formatted string.  This can then be used with email to send better formatted emails.
+
+Example usage
+
+DECLARE @GeneratedHTML NVARCHAR(MAX);
+EXEC sp_GenerateHTMLTableResults @ResultsTableName = N'<TableName>' ,-- Can be a tablename, temp table or view
+                                  @GeneratedHTML = @GeneratedHTML OUTPUT 
+EXEC msdb.dbo.sp_send_dbmail @profile_name = NULL ,
+                             @recipients = 'someone@domain.com' ,
+                             @blind_copy_recipients = '' ,
+                             @subject = 'HTML Table Results' ,
+                             @body = @GeneratedHTML ,
+                             @body_format = 'HTML'
+=================================================
+ USE master
+GO
+
+IF EXISTS (   SELECT *
+              FROM   sys.objects
+              WHERE  objects.object_id = OBJECT_ID(
+                                             N'[dbo].[sp_GenerateHTMLTableResults]')
+                     AND objects.type IN (N'P', N'PC'))
+    DROP PROCEDURE [dbo].[sp_GenerateHTMLTableResults]
+GO
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF NOT EXISTS (   SELECT *
+                  FROM   sys.objects
+                  WHERE  objects.object_id = OBJECT_ID(
+                                                 N'[dbo].[sp_GenerateHTMLTableResults]')
+                         AND objects.type IN (N'P', N'PC'))
+    BEGIN
+        EXEC sys.sp_executesql @statement = N'CREATE PROCEDURE [dbo].[sp_GenerateHTMLTableResults] AS'
+    END
+GO
+
+ALTER PROCEDURE [dbo].[sp_GenerateHTMLTableResults]
+    (
+        @ResultsTableName NVARCHAR(100) ,
+        @GeneratedHTML NVARCHAR(MAX) OUTPUT
+    )
+AS
+    BEGIN
+        DECLARE @BaseSQL NVARCHAR(MAX)
+        DECLARE @SQL NVARCHAR(MAX)
+        DECLARE @ColumnHeader NVARCHAR(MAX) = ''
+        DECLARE @TableResults NVARCHAR(MAX) = ''
+        DECLARE @ParmDefinition NVARCHAR(MAX)
+        DECLARE @BodyHTML NVARCHAR(MAX)
+        DECLARE @TableColumns TABLE
+            (
+                ColumnName NVARCHAR(MAX)
+            )
+
+        SET @BaseSQL = 'SELECT TN.N.value(''local-name(.)'', ''sysname'') AS ColumnName FROM (SELECT TV.* FROM ( SELECT 1 ) AS D(N) OUTER APPLY (SELECT TOP ( 0 ) * FROM '
+                       + @ResultsTableName
+                       + ' ) AS TV FOR XML PATH(''''), ELEMENTS XSINIL, TYPE ) AS TX(X) CROSS APPLY TX.X.nodes(''*'') AS TN(N)'
+
+        INSERT INTO @TableColumns ( ColumnName )
+        EXECUTE sys.sp_executesql @BaseSQL
+
+        SET @SQL = ' SELECT @Columns = isnull(@Columns,'''') + ''<th>'' +ColumnName + ''</th>'' FROM ('
+                   + @BaseSQL + ') a'
+
+        SET @ParmDefinition = N'@Columns nvarchar(max) OUTPUT';
+
+        EXECUTE sys.sp_executesql @SQL ,
+                                  @ParmDefinition ,
+                                  @Columns = @ColumnHeader OUTPUT;
+
+        SET @ColumnHeader = '<table cellpadding="2" cellspacing="2" border="1" style="font-family: Arial; font-size: 8pt">'
+                            + @ColumnHeader
+
+        SET @SQL = 'SELECT @BodyHTML = CAST((SELECT td = '
+
+        SELECT @SQL = @SQL + 'CAST(' + tc.ColumnName + ' as nvarchar(max)) '
+                      + '+''</td><td>''+'
+        FROM   @TableColumns AS tc
+
+        SET @SQL = LEFT(@SQL, LEN(@SQL) - 13) + ' FROM ( SELECT * FROM '
+                   + @ResultsTableName
+                   + ' ) AS d FOR XML PATH(''tr''), TYPE ) AS VARCHAR(MAX))'
+
+        SET @ParmDefinition = N'@BodyHTML nvarchar(max) OUTPUT';
+
+        EXECUTE sys.sp_executesql @SQL ,
+                                  @ParmDefinition ,
+                                  @BodyHTML = @BodyHTML OUTPUT;
+
+        SET @GeneratedHTML = @ColumnHeader
+                             + REPLACE(
+                                   REPLACE(@BodyHTML, '<', '<') ,
+                                   '>' ,
+                                   '>') + '<table>'
+    END
+
+
+GO
+
+EXEC sys.sp_MS_marksystemobject sp_GenerateHTMLTableResults
+
+GO
