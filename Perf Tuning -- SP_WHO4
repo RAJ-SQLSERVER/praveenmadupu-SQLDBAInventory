@@ -1,0 +1,162 @@
+--Executing Process Details
+
+
+USE [master];
+GO
+SET NOCOUNT ON;
+
+DECLARE @Today DATETIME 
+    ,   @sqlcmd NVARCHAR (MAX)
+    ,   @i INT
+    ,   @MaxRID INT
+    ,   @SPID INT
+    
+SELECT @Today = GETDATE();
+
+DECLARE @RunTimeInfo TABLE
+(
+    RID                 INT IDENTITY (1,1) NOT NULL
+,   DBName              NVARCHAR (256) NOT NULL
+,   blocking_session_id SMALLINT NULL
+,   session_id          SMALLINT NOT NULL
+,   client_net_address  VARCHAR  (48) NULL
+,   hostname            NVARCHAR (256) NULL
+,   loginame            NVARCHAR (256) NULL
+,   [Duration]          VARCHAR (25) NULL
+,   wait_type           NVARCHAR (120) NOT NULL
+,   wait_time	        INT NOT NULL
+,   wait_resource       NVARCHAR (512) NOT NULL
+,   [status]            NVARCHAR (60) NOT NULL
+,   [program_name]      NVARCHAR (256) NULL
+,   command	            NVARCHAR (32) NOT NULL
+,   objectid            INT NULL
+,   QueryText           NVARCHAR (MAX) NULL
+,   InputBuffer         NVARCHAR (4000) NULL
+,   percent_complete    REAL NULL
+,   connect_time        DATETIME NOT NULL
+,   start_time          DATETIME NOT NULL
+,   cpu_time            INT NULL
+);
+
+DECLARE @InputBuffer TABLE
+(
+    EventType NVARCHAR (4000)
+,   [PARAMETERS] INT
+,   EventInfo NVARCHAR (4000)
+)
+
+INSERT INTO @RunTimeInfo
+    (DBName, blocking_session_id, session_id, client_net_address, hostname, loginame
+    ,[Duration], wait_type, wait_time, wait_resource, [status], [program_name]
+    ,command, objectid, QueryText, percent_complete, connect_time, start_time, cpu_time
+    )
+SELECT  db.Name AS [DBName]
+    ,   req.blocking_session_id
+    ,   req.session_id
+    ,   con.client_net_address
+    ,   pro.hostname
+    ,   pro.loginame
+    ,   CASE WHEN DATEDIFF( HOUR,req.start_time,@Today ) > 24 THEN
+                CAST(DATEDIFF( DAY,req.start_time,@Today ) AS VARCHAR(18)) + ' Day(s)'
+            ELSE
+                RIGHT(REPLICATE('0',2)+CAST( (((DATEDIFF( millisecond,req.start_time,@Today )/1000)/60)/60)%60 AS VARCHAR ),2) +':' --Hours
+               +RIGHT(REPLICATE('0',2)+CAST( ((DATEDIFF( millisecond,req.start_time,@Today )/1000)/60)%60 AS VARCHAR ),2) +':'      --Minutes
+               +RIGHT(REPLICATE('0',2)+CAST( (DATEDIFF( millisecond,req.start_time,@Today )/1000)%60 AS VARCHAR ),2) +'.'           --Seconds
+               +RIGHT(REPLICATE('0',3)+CAST( DATEDIFF( millisecond,req.start_time,@Today )%1000 AS VARCHAR ),3)                     --Milliseconds
+        END AS [Duration (hh:mm:ss.nnn)]
+    ,   ISNULL(req.wait_type,'') AS wait_type
+    ,   req.wait_time
+    ,   req.wait_resource
+    ,   req.[status]
+    ,   pro.[program_name]
+    ,   req.command
+    ,   txt.objectid
+    ,   ISNULL(CAST(OBJECT_NAME(txt.objectid,DB_ID(db.name)) AS NVARCHAR(MAX)),txt.[text]) AS [QueryText]
+    ,   req.percent_complete
+    ,   con.connect_time
+    ,   req.start_time
+    ,   cpu_time
+
+FROM    sys.dm_exec_connections con INNER JOIN
+        ( SELECT spid
+            ,    LTRIM( RTRIM( hostname ) ) AS [hostname]
+            ,    LTRIM( RTRIM( loginame ) ) AS [loginame]
+            ,    LTRIM( RTRIM( [program_name] ) ) AS [program_name]
+          FROM  sys.sysprocesses 
+          WHERE ASCII(LTRIM( RTRIM( loginame ) )) IS NOT NULL
+        ) pro ON con.session_id = pro.spid INNER JOIN
+        sys.dm_exec_requests req ON con.connection_id = req.connection_id INNER JOIN
+        sys.databases db ON req.database_id = db.database_id CROSS APPLY
+        sys.dm_exec_sql_text( req.[sql_handle] ) AS txt 
+        
+WHERE   ISNULL(req.wait_type,'') NOT IN 
+                             ( 'BAD_PAGE_PROCESS','BROKER_EVENTHANDLER','BROKER_RECEIVE_WAITFOR','BROKER_TASK_STOP'
+                              ,'BROKER_TO_FLUSH','BROKER_TRANSMITTER','CHECKPOINT_QUEUE','CHKPT','CLR_SEMAPHORE'
+                              ,'DBMIRROR_EVENTS_QUEUE','FT_IFTS_SCHEDULER_IDLE_WAIT','KSOURCE_WAKEUP','LAZYWRITER_SLEEP'
+                              ,'LOGMGR_QUEUE','MISCELLANEOUS','ONDEMAND_TASK_QUEUE','REQUEST_FOR_DEADLOCK_SEARCH'
+                              ,'RESOURCE_QUEUE','SLEEP_SYSTEMTASK','SLEEP_TASK','SQLTRACE_BUFFER_FLUSH'
+                              ,'XE_DISPATCHER_WAIT','XE_TIMER_EVENT','WAITFOR'
+                             )
+        AND req.session_id != @@SPID 
+        
+ORDER BY 
+        db.Name
+    ,   req.session_id;
+    
+SELECT  @sqlcmd = N'DBCC INPUTBUFFER(@session_id)'
+    ,   @i = 0
+    ,   @MaxRID = MAX(RID)
+FROM    @RunTimeInfo;
+
+WHILE   @i <= @MaxRID
+ BEGIN
+ 
+    IF (    SELECT  objectid 
+            FROM    @RunTimeInfo 
+            WHERE   RID = @i
+        ) IS NULL
+     BEGIN
+        SELECT  @i = @i + 1;
+        DELETE  @InputBuffer;
+        CONTINUE;
+     END
+     
+    SELECT  @SPID = session_id
+    FROM    @RunTimeInfo
+    WHERE   RID = @i;
+    
+    INSERT INTO @InputBuffer
+    EXECUTE sp_executesql 
+                @sqlcmd
+            ,   N'@session_id int'
+            ,   @SPID;
+    
+    UPDATE  @RunTimeInfo
+    SET     InputBuffer = (SELECT EventInfo FROM @InputBuffer)
+    WHERE   RID = @i;
+    
+    SELECT @i = @i + 1
+    DELETE  @InputBuffer
+ END
+
+SELECT  DBName
+    ,   blocking_session_id
+    ,   session_id
+    ,   client_net_address
+    ,   hostname
+    ,   loginame
+    ,   [Duration]
+    ,   wait_type
+    ,   wait_time
+    ,   wait_resource
+    ,   [status]
+    ,   [program_name]
+    ,   command
+    ,   objectid
+    ,   QueryText
+    ,   InputBuffer
+    ,   percent_complete
+    ,   connect_time
+    ,   start_time
+    ,   cpu_time
+FROM    @RunTimeInfo
