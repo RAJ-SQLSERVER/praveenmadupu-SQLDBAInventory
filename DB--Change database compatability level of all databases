@@ -1,0 +1,49 @@
+--Change database compatability level of all databases
+--https://www.sqlservercentral.com/scripts/change-database-compatability-level-of-all-databases
+--Changes the database compatibility level of all databases to the given level.
+
+Compatability Level  Version
+   80 --  2000
+   90 --  2005
+   100 -- 2008
+   110 -- 2012
+ ==============================================
+ USE MASTER
+ go
+ DECLARE @Non2012Databases TABLE(
+row_id INT IDENTITY(1,1) ,
+database_name VARCHAR(MAX) 
+);
+
+
+INSERT INTO @Non2012Databases(database_name)
+SELECT name FROM sys.databases 
+WHERE compatibility_level != '110'
+ --Skip Read Only Databases
+ AND is_read_only = 0 ;
+
+
+DECLARE @databaseName NVARCHAR(255);
+DECLARE @currentCompatibilityLevel VARCHAR(100);
+DECLARE @counter INT = (SELECT COUNT(1) FROM @Non2012Databases );
+
+ 
+WHILE (@counter > 0 ) 
+BEGIN 
+
+       SELECT @databaseName = database_name FROM @Non2012Databases
+       WHERE row_id = @COUNTER;
+
+       SELECT @currentCompatibilityLevel = compatibility_level
+       FROM sys.databases WHERE name = @DATABASENAME;
+
+       -- CHANGE DATABASE COMPATIBILITY
+       EXECUTE sp_dbcmptlevel @DATABASENAME , '110';
+
+       PRINT  @DATABASENAME + ' compatability level changed to 110 from ' + @currentCompatibilityLevel ;
+
+       SET @COUNTER -= 1;
+
+END
+
+GO
