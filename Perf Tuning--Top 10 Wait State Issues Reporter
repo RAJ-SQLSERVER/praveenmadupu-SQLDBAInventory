@@ -1,0 +1,165 @@
+--Perf Tuning--Top 10 Wait State Issues Reporter
+--The execution of this script will produce a report of the top 10 issues with wait states. 
+--You can modiy this script to produce more or less information as needed. Full descriptions are provided for each wait state.
+
+===============================
+/* Top 10 Wait Stats Issiues Reporter*/
+/* Created by Rudy Panigas /*
+
+/* Create Temporary Tables for processing */
+
+SET NOCOUNT ON;
+
+create table #results
+( wait_type nvarchar(60)
+, waiting_tasks_count bigint
+, wait_time_ms bigint
+, max_wait_time_ms bigint
+, signal_wait_time_ms bigint
+, Comment varchar(max)
+)
+
+
+/* Insert Wait State information into temporary tables */
+
+insert #results
+( wait_type
+, waiting_tasks_count
+, wait_time_ms
+, max_wait_time_ms
+, signal_wait_time_ms
+)
+
+(select wait_type, waiting_tasks_count, wait_time_ms, max_wait_time_ms, signal_wait_time_ms from sys.dm_os_wait_stats 
+where 
+
+   wait_type = 'CXPACKET' 
+
+/* CPU Issues */
+OR wait_type = 'SOS_SCHEDULER_YIELD'
+/* Network Issues */
+OR wait_type = 'ASYNC_NETWORK_IO' 
+/* Locking Issues */
+OR wait_type = 'LCK_M_BU' 
+OR wait_type = 'LCK_M_IS' 
+OR wait_type = 'LCK_M_IU' 
+OR wait_type = 'LCK_M_IX' 
+OR wait_type = 'LCK_M_RIn_NL'
+OR wait_type = 'LCK_M_RIn_S'
+OR wait_type = 'LCK_M_RIn_U'
+OR wait_type = 'LCK_M_RIn_X'
+OR wait_type = 'LCK_M_RS_S' 
+OR wait_type = 'LCK_M_RS_U' 
+OR wait_type = 'LCK_M_RX_S' 
+OR wait_type = 'LCK_M_RX_U' 
+OR wait_type = 'LCK_M_RX_X' 
+OR wait_type = 'LCK_M_S'    
+OR wait_type = 'LCK_M_SCH_M' 
+OR wait_type = 'LCK_M_SCH_S' 
+OR wait_type = 'LCK_M_SIU'   
+OR wait_type = 'LCK_M_SIX'   
+OR wait_type = 'LCK_M_U'     
+OR wait_type = 'LCK_M_UIX'   
+OR wait_type = 'LCK_M_X'     
+OR wait_type = 'LATCH_DT'    
+OR wait_type = 'LATCH_EX'    
+OR wait_type = 'LATCH_KP'    
+OR wait_type = 'LATCH_SH'    
+OR wait_type = 'LATCH_UP'    
+--
+/* Memory Issues */
+OR wait_type = 'RESOURCE_SEMAPHORE' 
+OR wait_type = 'RESOURCE_SEMAPHORE_MUTEX'
+OR wait_type = 'RESOURCE_SEMAPHORE_QUERY_COMPILE'
+OR wait_type = 'RESOURCE_SEMAPHORE_SMALL_QUERY' 
+OR wait_type = 'WRITELOG'
+
+/* Disk or Disk Subsystem Issues */
+OR wait_type = 'PAGEIOLATCH_DT' 
+OR wait_type = 'PAGEIOLATCH_EX' 
+OR wait_type = 'PAGEIOLATCH_KP' 
+OR wait_type = 'PAGEIOLATCH_SH' 
+OR wait_type = 'PAGEIOLATCH_UP' 
+OR wait_type = 'PAGELATCH_DT' 
+OR wait_type = 'PAGELATCH_EX' 
+OR wait_type = 'PAGELATCH_KP' 
+OR wait_type = 'PAGELATCH_SH' 
+OR wait_type = 'PAGELATCH_UP' 
+OR wait_type = 'LOGBUFFER'
+OR wait_type = 'ASYNC_IO_COMPLETION'
+OR wait_type = 'IO_COMPLETION' 
+)
+
+DECLARE Waits_Cursor CURSOR FOR
+SELECT [wait_type] FROM [dbo].[#results] 
+OPEN Waits_Cursor
+FETCH NEXT FROM Waits_Cursor
+BEGIN
+	UPDATE [dbo].[#results] SET [Comment] = 'CPU - Execute this script: SELECT scheduler_id, current_tasks_count, runnable_tasks_count FROM sys.dm_os_schedulers WHERE scheduler_id < 255 ;If runnable tasks count > zero, CPU issues if double digits for any length of time, extreme CPU concern' WHERE  dbo.[#results].[wait_type] = 'SOS_SCHEDULER_YIELD'
+	UPDATE [dbo].[#results] SET [Comment] = 'SETTINGS OR CODE - Wait stats shows more than 5% of your waits are on CXPackets, you may want to test lower (or non-zero) values of “max degree of parallelism”. Never set value great than # of CPUs' WHERE  dbo.[#results].[wait_type] = 'CXPACKET'
+	UPDATE [dbo].[#results] SET [Comment] = 'NETWORK - Occurs on network writes when the task is blocked behind the network' WHERE  dbo.[#results].[wait_type] = 'ASYNC_NETWORK_IO'
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a Bulk Update (BU) lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_BU'
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Intent Shared (IS) lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_IS'
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Intent Update (IU) lock ' WHERE  dbo.[#results].[wait_type] = 'LCK_M_IU'
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Intent Exclusive (IX) lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_IX'
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a NULL lock on the current key value and an Insert Range lock between the current and previous key' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RIn_NL'
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a shared lock on the current key value and an Insert Range lock between the current and previous key' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RIn_S' 
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Update lock on the current key value, and an Insert Range lock between the current and previous key' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RIn_U' 
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Exclusive lock on the current key value, and an Insert Range lock between the current and previous key' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RIn_X' 
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a Shared lock on the current key value, and a Shared Range lock between the current and previous' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RS_S'  
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Update lock on the current key value, and an Update Range lock between the current and previous key' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RS_U'  
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a Shared lock on the current key value, and an Exclusive Range lock between the current and previous key' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RX_S'  
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Update lock on the current key value, and an Exclusive range lock between the current and previous key' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RX_U'  
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Exclusive lock on the current key value, and an Exclusive Range lock between the current and previous key' WHERE  dbo.[#results].[wait_type] = 'LCK_M_RX_X'  
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a Shared lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_S'     
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a Schema Modify lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_SCH_M' 
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a Schema Modify lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_SCH_S' 
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a Shared With Intent Update lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_SIU'   
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire a Shared With Intent Exclusive lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_SIX'   
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Update lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_U'     
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Update With Intent Exclusive lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_UIX'   
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting to acquire an Exclusive lock' WHERE  dbo.[#results].[wait_type] = 'LCK_M_X'     
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting for a DT (destroy) latch. This does not include buffer latches or transaction mark latches' WHERE  dbo.[#results].[wait_type] = 'LATCH_DT'    
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting for an EX (exclusive) latch. This does not include buffer latches or transaction mark latches' WHERE  dbo.[#results].[wait_type] = 'LATCH_EX'    
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting for a KP (keep) latch. This does not include buffer latches or transaction mark latches' WHERE  dbo.[#results].[wait_type] = 'LATCH_KP'    
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting for an SH (share) latch. This does not include buffer latches or transaction mark latches' WHERE  dbo.[#results].[wait_type] = 'LATCH_SH'    
+	UPDATE [dbo].[#results] SET [Comment] = 'LOCK - Waiting for an UP (update) latch. This does not include buffer latches or transaction mark latches' WHERE  dbo.[#results].[wait_type] = 'LATCH_UP'
+	UPDATE [dbo].[#results] SET [Comment] = 'MEMORY - Query memory request cannot be granted immediately due to other concurrent queries. High waits and wait times may indicate excessive number of concurrent queries, or excessive memory request amounts' WHERE  dbo.[#results].[wait_type] = 'RESOURCE_SEMAPHORE'
+	UPDATE [dbo].[#results] SET [Comment] = 'MEMORY - Query waits for its request for a thread reservation to be fulfilled. It also occurs when synchronizing query compile and memory grant requests' WHERE  dbo.[#results].[wait_type] = 'RESOURCE_SEMAPHORE_MUTEX'
+	UPDATE [dbo].[#results] SET [Comment] = 'MEMORY - Number of concurrent query compilations reaches a throttling limit. High waits and wait times may indicate excessive compilations, recompiles, or uncachable plans' WHERE  dbo.[#results].[wait_type] = 'RESOURCE_SEMAPHORE_QUERY_COMPILE'
+	UPDATE [dbo].[#results] SET [Comment] = 'MEMORY - Memory request by a small query cannot be granted immediately due to other concurrent queries. Wait time should not exceed more than a few seconds. High waits may indicate an excessive number of concurrent small queries while the main memory pool is blocked by waiting queries' WHERE  dbo.[#results].[wait_type] = 'RESOURCE_SEMAPHORE_SMALL_QUERY'
+	UPDATE [dbo].[#results] SET [Comment] = 'MEMORY - Waiting for a log flush to complete. Common operations that cause log flushes are checkpoints and transaction commits' WHERE  dbo.[#results].[wait_type] = 'WRITELOG'
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is in an I/O request. The latch request is in Destroy mode. Long waits may indicate problems with the disk subsystem' WHERE  dbo.[#results].[wait_type] = 'PAGEIOLATCH_DT' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is in an I/O request. The latch request is in Exclusive mode. Long waits may indicate problems with the disk subsystem' WHERE  dbo.[#results].[wait_type] = 'PAGEIOLATCH_EX' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is in an I/O request. The latch request is in Keep mode. Long waits may indicate problems with the disk subsystem' WHERE  dbo.[#results].[wait_type] = 'PAGEIOLATCH_KP' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is in an I/O request. The latch request is in Share mode. Long waits may indicate problems with the disk subsystem' WHERE  dbo.[#results].[wait_type] = 'PAGEIOLATCH_SH' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is in an I/O request. The latch request is in Update mode. Long waits may indicate problems with the disk subsystem' WHERE  dbo.[#results].[wait_type] = 'PAGEIOLATCH_UP' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is not in an I/O request. The latch request is in Destroy mode' WHERE  dbo.[#results].[wait_type] = 'PAGELATCH_DT' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is not in an I/O request. The latch request is in Exclusive mode' WHERE  dbo.[#results].[wait_type] = 'PAGELATCH_EX' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is not in an I/O request. The latch request is in Keep mode' WHERE  dbo.[#results].[wait_type] = 'PAGELATCH_KP' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is not in an I/O request. The latch request is in Shared mode' WHERE  dbo.[#results].[wait_type] = 'PAGELATCH_SH' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting on a latch for a buffer that is not in an I/O request. The latch request is in Update mode' WHERE  dbo.[#results].[wait_type] = 'PAGELATCH_UP' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting for space in the log buffer to store a log record. Consistently high values may indicate that the log devices cannot keep up with the amount of log being generated by the server' WHERE  dbo.[#results].[wait_type] = 'LOGBUFFER' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting for I/Os to finish' WHERE  dbo.[#results].[wait_type] = 'ASYNC_IO_COMPLETION' 
+	UPDATE [dbo].[#results] SET [Comment] = 'DISK - Waiting for I/O operations to complete. This wait type generally represents non-data page I/Os. Data page I/O completion waits appear as PAGEIOLATCH_* waits' WHERE  dbo.[#results].[wait_type] = 'IO_COMPLETION' 
+END
+		   
+FETCH NEXT FROM Waits_Cursor
+CLOSE Waits_Cursor
+DEALLOCATE Waits_Cursor
+
+/* View Final Results */
+SELECT TOP 10
+   WAIT_TYPE AS 'OS WAIT STATS - WAIT TYPE'
+ , WAITING_TASKS_COUNT AS 'TASKS WAITING COUNT'
+ , WAIT_TIME_MS AS 'TIME WAITING (MS)'
+ , MAX_WAIT_TIME_MS AS 'MAX TIME WAITING (MS)'
+ , SIGNAL_WAIT_TIME_MS AS 'SIGNAL TIME WAITING (MS)'
+ , COMMENT AS 'POSSIBLE ISSUES'
+ FROM #RESULTS
+ WHERE WAITING_TASKS_COUNT <> 0
+ ORDER BY WAIT_TIME_MS DESC
+
+ /* Clean Up */
+DROP TABLE #RESULTS;
+GO
