@@ -1,0 +1,126 @@
+--DB--Database Growth Audit
+--https://www.sqlservercentral.com/scripts/another-way-to-track-the-database-data-growth
+
+CREATE PROCEDURE #uspGetFileStats
+                    @dbName sysname
+AS
+    DECLARE @sqlCmd NVARCHAR(max)
+    SELECT @sqlCmd= 
+        'Use '+@dbName+'; '+
+        'SELECT '''+@dbName +''' [DBName]'+
+                ',sum(ROUND((cast ([size] as numeric)*8/1024),2)) [FileSizeMb] '+
+                ',sum(CASE '+
+                    'WHEN FILEPROPERTY([name], ''SpaceUsed'') IS NULL THEN 0 '+/*file is empty*/ 
+                'ELSE '+
+                    'ROUND(CAST (FILEPROPERTY([name], ''SpaceUsed'')as numeric)*8/1024,2) '+
+                'END) [UsedMb] '+
+                ',case when type    = 0 then ''ROWS'' when type =1 then ''LOG'' when type=4 then ''FULLTEXT'' end [FileType] '+/*2&3 reserved*/
+        'FROM [sys].[database_files] '+
+        'WHERE type=0 '+
+        'GROUP BY type'
+    EXECUTE (@sqlCmd)
+GO
+
+DECLARE databaseNamesArr CURSOR FAST_FORWARD READ_ONLY 
+FOR
+    SELECT [name]
+    FROM sys.databases
+    ORDER BY [name] ASC
+
+DECLARE @dbName NVARCHAR(128)
+DECLARE @tFileStats TABLE ([DBName] SYSNAME,[FileSizeMb] NUMERIC(18,2),[UsedSpaceMb]NUMERIC(18,2),[FileType] NVARCHAR (60))
+
+OPEN databaseNamesArr
+FETCH NEXT 
+FROM databaseNamesArr 
+INTO @dbName
+
+WHILE @@FETCH_STATUS=0
+    BEGIN        
+        INSERT @tFileStats
+             (
+                     [DBName]
+                    , [FileSizeMb]
+                    , [UsedSpaceMb]
+                    , [FileType]
+             )
+             EXECUTE #uspGetFileStats @dbName
+        FETCH NEXT 
+        FROM databaseNamesArr 
+        INTO @dbName
+    END
+CLOSE databaseNamesArr
+DEALLOCATE databaseNamesArr
+
+SELECT [DBName]
+        ,[UsedSpaceMb]
+        ,[FileSizeMb]
+        ,[FileType] 
+FROM @tFileStats
+GO
+
+DROP PROCEDURE #uspGetFileStats
+
+/********************************************************************/
+CREATE PROCEDURE #uspGetFileStats
+                    @dbName sysname
+AS
+    DECLARE @sqlCmd NVARCHAR(max)
+    SELECT @sqlCmd= 
+        'Use '+@dbName+'; '+
+        'SELECT '''+@dbName +''' [DBName]'+
+                ',[NAME] [FileName] '+
+                ',(ROUND((cast ([size] as numeric)*8/1024),2)) [FileSizeMb] '+
+                ',CASE '+
+                    'WHEN FILEPROPERTY([name], ''SpaceUsed'') IS NULL THEN 0 '+/*file is empty*/ 
+                'ELSE '+
+                    'ROUND(CAST (FILEPROPERTY([name], ''SpaceUsed'')as numeric)*8/1024,2) '+
+                'END [UsedMb] '+
+                ',case when type    = 0 then ''ROWS'' when type =1 then ''LOG'' when type=4 then ''FULLTEXT'' end [FileType] '+/*2&3 reserved*/
+        'FROM [sys].[database_files] '+
+        'WHERE type=0 '
+
+    EXECUTE (@sqlCmd)
+GO
+
+DECLARE databaseNamesArr CURSOR FAST_FORWARD READ_ONLY 
+FOR
+    SELECT [name]
+    FROM sys.databases
+    ORDER BY [name] ASC
+
+DECLARE @dbName NVARCHAR(128)
+DECLARE @tFileStats TABLE ([DBName] SYSNAME,[FileName] sysname, [FileSizeMb] NUMERIC(18,2),[UsedSpaceMb]NUMERIC(18,2),[FileType] NVARCHAR (60))
+
+OPEN databaseNamesArr
+FETCH NEXT 
+FROM databaseNamesArr 
+INTO @dbName
+
+WHILE @@FETCH_STATUS=0
+    BEGIN        
+        INSERT @tFileStats
+             (
+                     [DBName]
+                    , [FileName]
+                    , [FileSizeMb]
+                    , [UsedSpaceMb]
+                    , [FileType]
+             )
+             EXECUTE #uspGetFileStats @dbName
+        FETCH NEXT 
+        FROM databaseNamesArr 
+        INTO @dbName
+    END
+CLOSE databaseNamesArr
+DEALLOCATE databaseNamesArr
+
+SELECT [DBName]
+        ,[FileName]
+        ,[UsedSpaceMb]
+        ,[FileSizeMb]
+        ,[FileType] 
+FROM @tFileStats
+GO
+
+DROP PROCEDURE #uspGetFileStats
