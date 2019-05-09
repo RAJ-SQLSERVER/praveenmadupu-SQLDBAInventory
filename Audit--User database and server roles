@@ -1,0 +1,101 @@
+--Audit--User database and server roles
+
+  USE master
+/*Filters */
+DECLARE @DBName SYSNAME;
+DECLARE @DBPrincipal SYSNAME; 
+
+ SET @DBName = NULL; --exact match
+ SET @DBPrincipal = NULL; --wildcard search
+
+/*Script*/
+DECLARE @name SYSNAME
+DECLARE @T TABLE
+  ( DB SYSNAME 
+  , RolePrincipal SYSNAME 
+  , DBPrincipal SYSNAME 
+  , SysAdmin BIT
+  , SecurityAdmin BIT
+  , ServerAdmin BIT
+  , ProcessAdmin BIT
+  , SetupAdmin BIT
+  , BulkAdmin BIT
+  , DiskAdmin BIT
+  , DBCreator BIT
+  );
+DECLARE db_cursor CURSOR
+FOR
+  SELECT  d.name
+  FROM    sys.databases AS D
+  WHERE   state = 0
+  AND	  (d.name = @DBName OR @DBName IS NULL)
+
+OPEN db_cursor  
+FETCH NEXT FROM db_cursor INTO @name  
+
+WHILE @@FETCH_STATUS = 0 
+  BEGIN  
+    PRINT @name
+    INSERT  INTO @T
+            EXEC ( 'USE [' + @name + ']; 
+SELECT  DB = DB_NAME(), RDP.name, MDP.name, SL.sysadmin, SL.securityadmin, 
+		SL.serveradmin, SL.processadmin, SL.setupadmin, SL.bulkadmin, SL.diskadmin, SL.dbcreator
+FROM    sys.database_role_members AS DRM
+INNER JOIN sys.database_principals AS RDP
+        ON DRM.role_principal_id = RDP.principal_id 
+INNER JOIN sys.database_principals AS MDP
+        ON DRM.member_principal_id = MDP.principal_id 
+INNER JOIN master.dbo.syslogins AS SL
+        ON MDP.name = SL.name COLLATE DATABASE_DEFAULT'
+                 )
+    FETCH NEXT FROM db_cursor INTO @name  
+  END  
+
+CLOSE db_cursor  
+DEALLOCATE db_cursor;
+
+WITH  CTE
+        AS ( SELECT DBPrincipal
+                  , DB
+                  , SysAdmin
+                  , SecurityAdmin
+                  , ServerAdmin
+                  , SProcessAdmin
+                  , SetupAdmin
+                  , DbCreator
+                  , BulkAdmin
+                  , DiskAdmin
+                  , DB_Owner = MAX(DB_Owner)
+                  , DB_SecurityAdmin = MAX(DB_SecurityAdmin)
+                  , DB_AccessAdmin = MAX(DB_AccessAdmin)
+                  , DB_BackupOperator = MAX(DB_BackupOperator)
+                  , DB_DDLAdmin = MAX(DB_DDLAdmin)
+                  , DB_DataReader = MAX(DB_DataReader)
+                  , DB_DataWriter = MAX(DB_DataWriter)
+             FROM   ( SELECT DB 
+						   , DBPrincipal
+						   , SysAdmin = CASE SysAdmin WHEN 1 THEN 'SA' ELSE '' END
+						   , SecurityAdmin = CASE SecurityAdmin WHEN 1 THEN 'Sec' ELSE '' END
+						   , ServerAdmin = CASE ServerAdmin WHEN 1 THEN 'Srv' ELSE '' END
+						   , SProcessAdmin = CASE ProcessAdmin WHEN 1 THEN 'PA' ELSE '' END
+						   , SetupAdmin = CASE SetupAdmin WHEN 1 THEN 'Set' ELSE '' END            
+						   , BulkAdmin = CASE BulkAdmin WHEN 1 THEN 'BA' ELSE '' END
+						   , DiskAdmin = CASE DiskAdmin WHEN 1 THEN 'DA' ELSE '' END    
+						   , DbCreator = CASE DBCreator WHEN 1 THEN 'DbC' ELSE '' END
+						   , DB_Owner = CASE WHEN RolePrincipal = 'DB_Owner' THEN 'O' ELSE '' END
+						   , DB_SecurityAdmin = CASE WHEN RolePrincipal = 'DB_SecurityAdmin' THEN 'S' ELSE '' END
+						   , DB_AccessAdmin = CASE WHEN RolePrincipal = 'DB_AccessAdmin' THEN 'A' ELSE '' END
+						   , DB_BackupOperator = CASE WHEN RolePrincipal = 'DB_BackupOperator' THEN 'B' ELSE '' END
+						   , DB_DDLAdmin = CASE WHEN RolePrincipal = 'DB_DDLAdmin' THEN 'D' ELSE '' END
+						   , DB_DataReader = CASE WHEN RolePrincipal = 'DB_DataReader' THEN 'R' ELSE '' END
+						   , DB_DataWriter = CASE WHEN RolePrincipal = 'DB_DataWriter' THEN 'W' ELSE '' END	    
+                      FROM @T
+                    ) AS SourceTable
+             GROUP BY DBPrincipal, DB, SysAdmin, SecurityAdmin, ServerAdmin, SProcessAdmin
+                  , SetupAdmin, DbCreator, BulkAdmin, DiskAdmin
+           )
+  SELECT  DBPrincipal, DB, DB_Owner, DB_DDLAdmin, DB_DataWriter, DB_DataReader, DB_SecurityAdmin
+        , DB_AccessAdmin, DB_BackupOperator, SysAdmin, SecurityAdmin, ServerAdmin, SetupAdmin, DbCreator
+  FROM    CTE
+  WHERE ( DbPrincipal LIKE '%' + @DBPrincipal + '%' OR @DBPrincipal IS NULL)
+  ORDER BY DBPrincipal, DB;
