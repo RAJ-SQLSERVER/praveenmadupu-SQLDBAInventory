@@ -1,0 +1,28 @@
+--Database Properties
+
+USE DBName
+go
+ SELECT DISTINCT
+	a.database_id,
+	a.name AS dbName,
+	a.compatibility_level,
+	CONVERT(VARCHAR(25), a.create_date, 106) AS dbCreateDate,
+	CONVERT(VARCHAR(25), CAST(CAST(SUM(b.size * 8.0 / 1024) AS NUMERIC(10,2)) AS money), 1) AS 'Size(MB)',
+	DATABASEPROPERTYEX(a.name, 'Recovery') AS recoveryMode, 
+	DATABASEPROPERTYEX(a.name, 'Status') AS databaseStatus,
+	CASE DATABASEPROPERTYEX(a.name, 'IsAutoCreateStatistics') WHEN 1 THEN 'TRUE' ELSE 'FALSE' END AS autoCreateStatsEnabled,
+	CASE DATABASEPROPERTYEX(a.name, 'IsAutoUpdateStatistics') WHEN 1 THEN 'TRUE' ELSE 'FALSE' END AS autoUpdateStatsEnabled,
+	DATABASEPROPERTYEX(a.name, 'UserAccess') AS userAccess,
+	DATABASEPROPERTYEX(a.name, 'Updateability') AS Updateability,
+	CASE DATABASEPROPERTYEX(a.name, 'IsTornPageDetectionEnabled') WHEN 1 THEN 'TRUE' ELSE 'FALSE' END AS tornPageDetectionEnabled,
+	CASE DATABASEPROPERTYEX(a.name, 'IsRecursiveTriggersEnabled') WHEN 1 THEN 'TRUE' ELSE 'FALSE' END AS recursiveTriggersEnabled,
+	CASE DATABASEPROPERTYEX(a.name, 'IsInStandBy') WHEN 1 THEN 'TRUE' ELSE 'FALSE' END AS isDBStandBy
+FROM
+	master.sys.databases a INNER JOIN master.sys.master_files b ON a.database_id = b.database_id
+GROUP BY 
+	a.database_id,
+	a.name,
+	a.compatibility_level,
+	CONVERT(VARCHAR(25), a.create_date, 106)
+ORDER BY 
+	1
