@@ -1,0 +1,14 @@
+--SSIS Packages and their Location
+--This will give you a list of jobs that contain SSIS Packages should you have a project in which you may need 
+--to review changes to Packages.
+
+Use msdb;
+SELECT sysjobs.name AS 'JobName', 
+sysjobsteps.step_id AS 'Step#', 
+sysjobsteps.command AS 'SSISLocation'
+FROM sysjobs INNER JOIN
+sysjobsteps ON sysjobs.job_id = sysjobsteps.job_id
+where subsystem='ssis'
+order by 1
+
+
