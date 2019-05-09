@@ -1,0 +1,17 @@
+--Data File Information
+
+Use dbname
+go
+SELECT dbf.file_id AS FileID
+	, dbf.name AS [FileName] 
+	, s.filename AS FileLocation
+	, CAST(dbf.size/128.0 AS DECIMAL(19,2)) AS FileSizeMB
+	, CAST(CAST(FILEPROPERTY(dbf.name, 'SpaceUsed') AS int)/128.0 AS DECIMAL(19,2)) AS SpaceUsedMB
+	, CAST(dbf.size/128.0 - CAST(FILEPROPERTY(dbf.name, 'SpaceUsed') AS int)/128.0 AS DECIMAL(19,2)) AS AvailableSpaceMB
+	, CAST((dbf.size / 128.0 - (FILEPROPERTY(dbf.name, 'SpaceUsed') / 128.0)) / (dbf.size / 128.0) * 100 AS DECIMAL(19,2)) AS [%FreeSpace]
+	, dbf.growth / 128 AS FileGrowthMB
+	, f.name AS FilegroupName
+FROM sys.database_files dbf
+	INNER JOIN sys.sysfiles s ON dbf.name = s.name
+	LEFT JOIN sys.filegroups f ON dbf.data_space_id = f.data_space_id
+ORDER BY dbf.name;
