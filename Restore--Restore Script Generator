@@ -1,0 +1,213 @@
+--Restore Script Generator
+===================================================
+--https://www.sqlservercentral.com/scripts/restore-script-generator
+===================================================
+--If you have a database with multiple files that you need to restore from one server to another, it can be a real pain.  
+--But this script makes it easy.  Just put in the file path of where your backup file lives and it will create a fully formed restore script for you.  Just update the location of where you want to restore the backup to and you are good to go. 
+--This is especially helpful when you have a database with a dozen or more file groups.
+--I did not write this and I don't want to take credit for it, but it is a great tool to have.  
+--Whoever JenS@Microsoft is, my hat is off to them.
+===================================================
+SET NOCOUNT ON      
+
+declare @BackupFolder VARCHAR(MAX) = '\\<File Path of backup files goes here>\'
+declare @BackupFilePattern VARCHAR(MAX) = '*.bak'
+declare @Overwrite int = 0
+declare @DropDatabaseFirst int = 0
+declare @IncludeMoveOperation int = 1
+declare @Debug int = 0
+
+      
+PRINT '--BackupFile restore (JensS@Microsoft.com), 08.09.2011 V0.2'      
+PRINT '--========================================================='      
+      
+IF(@BackupFilePattern IS NULL)      
+BEGIN      
+ RAISERROR('No BackupFilePattern was passed, using the default wildcard pattern *.bak',10,1)      
+ SET @BackupFilePattern = '*.bak'      
+END      
+      
+/* DECLARE Variables*/      
+DECLARE @FileCounter INT = 0      
+      
+DECLARE @BackupCommand NVARCHAR(MAX) = ''       
+DECLARE @BackupFile NVARCHAR(MAX) = ''       
+DECLARE @DatabaseName SYSNAME =  ''      
+DECLARE @IncludeMoveOperationScript NVARCHAR(MAX) = ''      
+      
+      
+DECLARE @dirList TABLE(id int identity(1,1),dirline nvarchar(MAX),isFile BIT)      
+DECLARE @Files TABLE(id int identity(1,1),name nvarchar(MAX))      
+      
+      
+DECLARE @RestoreInformation TABLE      
+(      
+ LogicalName nvarchar(128),      
+ PhysicalName nvarchar(260),      
+ Type char(1),      
+ FileGroupName nvarchar(128),      
+ Size numeric(20,0),      
+ MaxSize numeric(20,0),       
+ FileID bigint,       
+ CreateLSN numeric(25,0),       
+ DropLSN numeric(25,0),      
+ UniqueID uniqueidentifier,       
+ ReadOnlyLSN numeric(25,0),      
+ ReadWriteLSN numeric(25,0),      
+ BackupSizeInBytes bigint,      
+ SourceBlockSize int,      
+ FileGroupID int,      
+ LogGroupGUID uniqueidentifier,      
+ DifferentialBaseLSN numeric(25,0),      
+ DifferentialBaseGUID uniqueidentifier,      
+ IsReadOnly bit,      
+ IsPresent bit,      
+ TDEThumbprint varbinary(32)       
+)      
+      
+      
+DECLARE @BackupHeader Table      
+(      
+BackupName nvarchar(128),      
+BackupDescription nvarchar(255),      
+BackupType smallint,      
+ExpirationDate datetime,      
+Compressed BIT,      
+Position smallint,      
+DeviceType tinyint,      
+UserName nvarchar(128),      
+ServerName nvarchar(128),      
+DatabaseName nvarchar(128),      
+DatabaseVersion int,      
+DatabaseCreationDate datetime,      
+BackupSize numeric(20,0),      
+FirstLSN numeric(25,0),      
+LastLSN numeric(25,0),      
+CheckpointLSN numeric(25,0),      
+DatabaseBackupLSN numeric(25,0),      
+BackupStartDate datetime,      
+BackupFinishDate datetime,      
+SortOrder smallint,      
+CodePage smallint,      
+UnicodeLocaleId int,      
+UnicodeComparisonStyle int,      
+CompatibilityLevel tinyint,      
+SoftwareVendorId int,      
+SoftwareVersionMajor int,      
+SoftwareVersionMinor int,      
+SoftwareVersionBuild int,      
+MachineName nvarchar(128),      
+Flags int,      
+BindingID uniqueidentifier,      
+RecoveryForkID uniqueidentifier,      
+Collation nvarchar(128),      
+FamilyGUID uniqueidentifier,      
+HasBulkLoggedData bit,      
+IsSnapshot bit,      
+IsReadOnly bit,      
+IsSingleUser bit,      
+HasBackupChecksums bit,      
+IsDamaged bit,      
+BeginsLogChain bit,      
+HasIncompleteMetaData bit,      
+IsForceOffline bit,      
+IsCOpyOnly bit,      
+FirstRecoveryForkID uniqueidentifier,      
+ForkPointLSN numeric(25,0) NULL,      
+RecoveryModel nvarchar(60),      
+DifferentialBaseLSN numeric(25,0) NULL,      
+DifferentialBaseGUID uniqueidentifier,      
+BackupTypeDescription nvarchar(60),      
+BackupSetGUID uniqueidentifier,      
+CompressedBackupSize BIGINT      
+)      
+      
+SET @BackupFilePattern = 'xp_cmdshell ''dir ' + @BackupFolder + @BackupFilePattern + ''''      
+      
+/* Get all the files within the pattern */      
+INSERT INTO @dirList (dirline) EXEC(@BackupFilePattern)      
+      
+/* Filter the shell output to files only */      
+;WITH TempTable(id,dirline)      
+AS      
+(      
+  SELECT      
+ id,      
+ dirline      
+  FROM @dirList      
+  WHERE id > (      
+    SELECT MIN(id) FROM @dirList WHERE dirline LIKE '%Directory of%'      
+  ) AND id < (SELECT MAX(id) - 2 FROM @dirList)      
+  and dirline IS NOT NULL      
+)      
+INSERT INTO @Files(name)      
+SELECT       
+ dirline = @BackupFolder +       
+  (      
+   CASE WHEN T.dirline LIKE '__/__/%' THEN SUBSTRING(T.dirline,40,100) ELSE      
+   SUBSTRING(T.dirline,37,100) END      
+  )      
+FROM TempTable T      
+INNER JOIN @dirList d      
+ON d.id = T.id;      
+      
+/* Get the number of real files*/      
+SET @FileCounter = @@ROWCOUNT      
+      
+IF (@FileCounter = 0)      
+BEGIN      
+ RAISERROR('No files with the pattern found. The dir of the passed directory comes back with the following information',10,1)      
+ select @BackupFilePattern
+ --EXEC(@BackupFilePattern)      
+ RETURN      
+END      
+      
+WHILE @FileCounter >0      
+BEGIN      
+      
+ SELECT       
+  @BackupFile = name       
+ FROM @Files      
+ WHERE id = @FileCounter      
+      
+ PRINT '--Generating command for found file ' + @BackupFile      
+           
+ /* Create the Backup command */       
+ INSERT INTO @RestoreInformation      
+ EXEC sp_executesql N'RESTORE FILELISTONLY FROM DISK = @BackupFile',N'@BackupFile NVARCHAR(MAX)', @BackupFile      
+           
+ SET @IncludeMoveOperationScript = ''
+
+ IF @IncludeMoveOperation = 0x1
+BEGIN
+      SELECT @IncludeMoveOperationScript += CHAR(13) + ' MOVE ' + QUOTENAME(R.LogicalName, CHAR(39)) + ' TO ' + QUOTENAME(R.PhysicalName, CHAR(39)) + ','
+      FROM @RestoreInformation R
+END
+   
+ INSERT INTO @BackupHeader      
+ EXEC sp_executesql N'RESTORE HEADERONLY FROM DISK = @BackupFile',N'@BackupFile NVARCHAR(MAX)', @BackupFile      
+       
+ SELECT @DatabaseName = DatabaseName FROM @BackupHeader      
+        
+ IF @DropDatabaseFirst = 0x1  
+ SET @BackupCommand = 'ALTER DATABASE [' + @DatabaseName + '] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; ' + CHAR(13) + 'DROP DATABASE [' + @DatabaseName + '];' + CHAR(13)  
+ ELSE  
+ SET @BackupCommand = ''  
+   
+ SET @BackupCommand += 'RESTORE DATABASE [' + @DatabaseName + '] FROM DISK=' + QUOTENAME(@BackupFile, CHAR(39)) + ' WITH NOUNLOAD, '  + CASE WHEN @Overwrite = 0x1 THEN 'REPLACE,' ELSE '' END + @IncludeMoveOperationScript + ' STATS = 10'      
+      
+ IF @Debug = 0x1      
+  SELECT @BackupCommand      
+ ELSE      
+  PRINT(@BackupCommand)      
+      
+ PRINT CHAR(13)      
+      
+ /* Decrement counter for the next file*/       
+ SET @FileCounter-=1      
+      
+ /* Clean the house */      
+ DELETE FROM @RestoreInformation      
+ DELETE FROM @BackupHeader      
+ SET @BackupCommand = ''      
+END
