@@ -1,0 +1,50 @@
+--Retrieve SSRS report schedule info through SQL
+Grabs information about what reports in SSRS are scheduled, when are they due to be sent out, 
+report parameters and any errors in the last run etc.
+Please note that the XPath on the [Parameters] column varies based on what parameters are setup in your own report. 
+Please adjust them for your own purpose. Also the 'Prompt' value for a parameter is not stored, so you might have to 
+join back to the relevant table for a friendly name.
+Also there is additional info in the [ExtensionSetting].
+=============================================================
+  SELECT
+	[Locale],
+	[InactiveFlags],
+	'Next Run Date' = CASE next_run_date
+		WHEN 0 THEN null
+		ELSE
+		substring(convert(varchar(15),next_run_date),1,4) + '/' +
+		substring(convert(varchar(15),next_run_date),5,2) + '/' +
+		substring(convert(varchar(15),next_run_date),7,2)
+	END,
+	'Next Run Time' = isnull(CASE len(next_run_time)
+		WHEN 3 THEN cast('00:0'
+		+ Left(right(next_run_time,3),1)
+		+':' + right(next_run_time,2) as char (8))
+		WHEN 4 THEN cast('00:'
+		+ Left(right(next_run_time,4),2)
+		+':' + right(next_run_time,2) as char (8))
+		WHEN 5 THEN cast('0' + Left(right(next_run_time,5),1)
+		+':' + Left(right(next_run_time,4),2)
+		+':' + right(next_run_time,2) as char (8))
+		WHEN 6 THEN cast(Left(right(next_run_time,6),2)
+		+':' + Left(right(next_run_time,4),2)
+		+':' + right(next_run_time,2) as char (8))
+	END,'NA'),
+	Convert(XML,[ExtensionSettings]).value('(//ParameterValue/Value[../Name="TO"])[1]','nvarchar(50)') as [To]
+	,Convert(XML,[ExtensionSettings]).value('(//ParameterValue/Value[../Name="RenderFormat"])[1]','nvarchar(50)') as [Render Format]
+	,Convert(XML,[ExtensionSettings]).value('(//ParameterValue/Value[../Name="Subject"])[1]','nvarchar(50)') as [Subject]
+        ---Example report parameters: StartDateMacro, EndDateMacro & Currency.
+	,Convert(XML,[Parameters]).value('(//ParameterValue/Value[../Name="StartDateMacro"])[1]','nvarchar(50)') as [Start Date]
+	,Convert(XML,[Parameters]).value('(//ParameterValue/Value[../Name="EndDateMacro"])[1]','nvarchar(50)') as [End Date]
+	,Convert(XML,[Parameters]).value('(//ParameterValue/Value[../Name="Currency"])[1]','nvarchar(50)') as [Currency]
+	,[ModifiedDate]
+	,S.[Description]
+	,[LastStatus]
+	,[EventType]
+	,[LastRunTime]
+	,[DeliveryExtension]
+	,[Version]
+FROM [ReportServer$LIVE].[dbo].[Subscriptions] S
+	INNER JOIN ReportServer$LIVE.dbo.ReportSchedule R ON S.SubscriptionID = R.SubscriptionID
+	INNER JOIN msdb.dbo.sysjobs J ON Convert(nvarchar(128),R.ScheduleID) = J.name
+	INNER JOIN msdb.dbo.sysjobschedules JS ON J.job_id = JS.job_id
