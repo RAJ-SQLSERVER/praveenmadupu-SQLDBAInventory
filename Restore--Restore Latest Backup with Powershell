@@ -1,0 +1,230 @@
+--Restore--Restore Latest Backup with Powershell
+--https://www.sqlservercentral.com/scripts/restore-latest-backup-with-powershell
+==========================================================================================
+--This script is used to restore a full backup of an existing database to a server of your choice.  If the latest full backup is not found, or if the $newBackup switch is on, a new full backup is created.  If the database already exists on the destination server, it will not be replaced.
+--Before running the script, set the value of the $backupFolder variable to a directory that both the source and destination SQL Server Service accounts can access.
+
+--To restore the latest backup to the same server:
+--.\Restore-LatestBackup.ps1 "DbName" "ServerA" "ServerA" "NewDbName"
+
+To restore a new backup to a different server:
+--.\Restore-LatestBackup.ps1 "DbName" "ServerA" "ServerB" -newBackup
+
+To use SQL Authentication:
+--.\Restore-LatestBackup.ps1 "DbName" "ServerA" "ServerB" "NewDbName" -newBackup -sqlAuth "sa" "p4$$w0rd"
+==========================================================================================
+#########################################################################################
+# Title:	Restore-LatestBackup.ps1
+# Created:	3/29/2013, Luke Losli
+# Usage:	Restores the latest backup of a database to a destination server of your choice.
+#			If no full backup exists, or if the $newBackup switch is on, a new backup is created.
+#
+#########################################################################################
+param
+(
+	[string]$dbName = "",
+	[string]$sourceServerInstance = "",
+	[string]$destServerInstance = "",
+	[string]$newDbName = "",
+	[switch]$newBackup = $false,
+	[switch]$sqlAuth = $false,
+	[string]$login = "",
+	[string]$password = ""
+)
+
+#Settings You Might Want to Adjust#####################
+$backupFolder = "\\192.168.1.100\SQLBACKUP";
+$sqlTimeoutPeriod = 1800;	#Default is 10 min (600 sec), which is too short for some restores
+#######################################################
+
+#Debug/Test Values##########################################
+#$dbName = "GoDucks";
+#$sourceServerInstance = "DUCKSQL01\DUCKSQL";
+#$destServerInstance = "DUCKSQL02\DUCKSQL";
+#$newDbName = $dbName + "_2";
+#$newBackup = $true;
+#$sqlAuth = $true;
+#$login = "sqlLogin";
+#$password = "strongPw";
+#######################################################
+
+Clear-Host
+
+#Load required assemblies
+	[void][reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.ConnectionInfo");
+	[void][reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.Smo");
+	[void][reflection.assembly]::LoadWithPartialName("Microsoft.SqlServer.SmoExtended");
+	
+#Write Errors to Log or Console
+Trap [Exception] 
+{
+	$err = $_.Exception
+	while ( $err.InnerException )
+    {
+    	$err = $err.InnerException;
+		$errorfullmessage += $err.Message + " ";
+	};
+	#$errorfullmessage | out-File ("C:\temp\ERROR_RestoreLatestBackup.txt") -Append;
+	Write-Host $errorfullmessage;
+	break;
+}
+
+#Check parameters
+if (($dbName -eq "") -or ($sourceServerInstance -eq "") -or ($destServerInstance -eq ""))
+{
+	Write-Host "dbName, sourceServerInstance and destServerInstance parameters are required!" -ForegroundColor Red;
+	Write-Host "Usage: .\RestoreLatestBackup.ps1 -dbName -sourceServerInstance -destServerInstance" -ForegroundColor Red;
+	Write-Host "Optional: -newDBName -newBackup -sqlAuth -login -password" -ForegroundColor Red;
+	break;
+}
+if (($sqlAuth -eq $true) -and (($login -eq "") -or ($password -eq "")))
+{
+	Write-Host "If sqlAuth parameter is true, login and password must be provided!" -ForegroundColor Red;
+	Write-Host "Usage: .\RestoreLatestBackup.ps1 -dbName -sourceServerInstance -destServerInstance" -ForegroundColor Red;
+	Write-Host "Optional: -newDBName -newBackup -sqlAuth -login -password" -ForegroundColor Red;
+	break;
+}
+if (($sourceServerInstance -eq $destServerInstance) -and ($newDbName -eq ""))
+{
+	Write-Host "If the newDbName parameter is not provided, then source and destination servers must be different!" -ForegroundColor Red;
+	break;
+}
+if ($newDbName -eq "")
+{
+	$newDbName = $dbName;
+}
+
+Write-Host "Starting restore process for database $dbName from $sourceServerInstance to $destServerInstance" -ForegroundColor DarkGreen;
+Write-Host "Checking for $newDbName on destination server..." -ForegroundColor DarkGreen;
+
+#Make sure db doesn't already exist on destination server
+$destServerConnection = New-Object ('Microsoft.SqlServer.Management.Common.ServerConnection');
+$destServerConnection.ServerInstance = $destServerInstance;
+if ($sqlAuth -eq $true)
+{
+	$destServerConnection.LoginSecure = $false;
+	$destServerConnection.Login = $login;
+	$destServerConnection.Password = $password;
+}
+else
+{
+	$destServerConnection.LoginSecure = $true;
+}
+
+$smoDestination = New-Object ('Microsoft.Sqlserver.Management.Smo.Server') ($destServerConnection);
+$smoDestination.ConnectionContext.StatementTimeout = $sqlTimeoutPeriod;
+
+$dbOnline = $null;
+$dbOnline = $smoDestination.Databases | Where-Object {$_.Name -eq $newDbName};
+if ($dbOnline -ne $null)
+{
+	Write-Host "Database $newDbName already exists on $destServerInstance! RESTORE FAIL." -ForegroundColor Red;
+	break;		
+}
+
+Write-Host "Database $newDbName not found on $destServerInstance. Proceeding..." -ForegroundColor DarkGreen;
+
+#Parse server and instance names
+$parsedSourceServerInstance = $sourceServerInstance.split("\");
+$sourceServer = $parsedSourceServerInstance[0];
+$sourceInstance = $parsedSourceServerInstance[1];
+
+$parsedDestServerInstance = $destServerInstance.split("\");
+$destServer = $parsedDestServerInstance[0];
+$destInstance = $parsedDestServerInstance[1];
+
+#Setup source server connection
+$sourceServerConnection = New-Object ('Microsoft.SqlServer.Management.Common.ServerConnection');
+$sourceServerConnection.ServerInstance = $sourceServerInstance;
+if ($sqlAuth -eq $true)
+{
+	$sourceServerConnection.LoginSecure = $false;
+	$sourceServerConnection.Login = $login;
+	$sourceServerConnection.Password = $password;
+}
+else
+{
+	$sourceServerConnection.LoginSecure = $true;
+}
+$smoSource = New-Object ('Microsoft.SqlServer.Management.Smo.Server') ($sourceServerConnection);
+
+#Get most recent backup filename from msdb
+$backupFilePath = $null;
+	
+if ($newBackup -eq $false)
+{
+	$sourceMsdb = $smoSource.Databases["msdb"];
+	$latestBackupQuery = "SELECT	TOP 1 bmf.physical_device_name as Filename
+	FROM	msdb.dbo.backupset bs
+	JOIN	msdb.dbo.backupmediafamily bmf
+		ON (bs.media_set_id = bmf.media_set_id
+		AND bs.database_name = '$dbName'
+		AND bs.type = 'D')
+	ORDER BY bs.backup_finish_date DESC";
+	$backupFilePath = $sourceMsdb.ExecuteWithResults($latestBackupQuery).Tables[0].Rows[0].Filename;
+
+	if ($backupFilePath -eq $null)
+	{
+		Write-Host "No full backup found in msdb.dbo.backupset! Taking a new full backup..." -ForegroundColor DarkGreen;
+		$newBackup = $true;
+	}
+	else
+	{
+		#See if the backup file actually exists where expected
+		$backupExists = Test-Path $backupFilePath;
+		if ($backupExists -eq $false)
+		{
+			Write-Host "Could not locate backup file $backupFilePath! Taking a new full backup..." -ForegroundColor DarkGreen;
+			$newBackup = $true;
+		}
+		else
+		{
+			Write-Host "Most recent full backup has been located." -ForegroundColor DarkGreen;
+		}
+	}
+}
+
+#Take a new full backup if needed
+if ($newBackup -eq $true)
+{
+	$timestamp = Get-Date -Format yyyyMMddHHmmss;
+	$backupFilePath = $backupFolder + "\" + $dbName + "_FULL_" + $timestamp + ".bak";
+	$smoNewBackup = New-Object Microsoft.SqlServer.Management.Smo.Backup;
+	$smoNewBackup.Action = "Database";
+	$smoNewBackup.CopyOnly = $true;
+	$smoNewBackup.Database = $dbName;
+	$smoNewBackup.Devices.AddDevice($backupFilePath, "File");
+	$smoNewBackup.Initialize = $true;
+	$smoNewBackup.SqlBackup($sourceServerConnection);
+	Write-Host "Full backup $backupFilePath created successfully!" -ForegroundColor DarkGreen;	
+}
+	
+Write-host "Restoring file $backupFilePath as $newDbName on $destServerInstance" -ForegroundColor DarkGreen;
+
+#Prepare to restore the database on the destination server
+$smoNewDB = New-Object Microsoft.Sqlserver.Management.Smo.Restore;
+$smoNewDB.Devices.AddDevice($backupFilePath, "File");
+$smoNewDB.NoRecovery = $false;
+$smoNewDB.Action = "Database";
+$smoNewDB.Database =  $newDbName;
+$smoNewDB.ReplaceDatabase = $false;
+$backupFiles = $smoNewDB.ReadFileList($destServerConnection); 
+
+# Loop through backup file and configure data and log file names. 
+$logicalFilename = $null;
+$physicalFilename = $null;
+
+foreach ($dbFile IN $backupFiles.Rows)	{
+	$logicalFilename = $dbFile.LogicalName;
+	$physicalFilename = $dbFile.PhysicalName.Replace($sourceInstance, $destInstance).Replace($dbName, $newDbName);
+	
+	$smoMoveFile = New-Object('Microsoft.SqlServer.Management.Smo.RelocateFile');
+	$smoMoveFile.LogicalFileName = $logicalFilename;
+	$smoMoveFile.PhysicalFileName = $physicalFilename;
+	$smoNewDB.RelocateFiles.Add($smoMoveFile);
+}
+
+#Restore db
+$smoNewDB.SqlRestore($destServerConnection);
+
+Write-Host "SUCCESS! Database Restored as $newDbName!" -ForegroundColor DarkGreen;
