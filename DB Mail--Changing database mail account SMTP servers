@@ -1,0 +1,92 @@
+--Changing database mail account SMTP servers
+--https://www.sqlservercentral.com/scripts/changing-database-mail-account-smtp-servers
+===================================================
+--Change @NewSMTP to a valid server name or IP address or leave NULL if you just want to generate the accounts as they are.
+--To skip the ping test, simply change @TestPing to 0.
+--If you have many accounts then it might be necessary to remove
+--@SQL = @SQL +
+--from the SELECT statement.
+--This will return each accounts TSQL in table format.
+--For SMTP authentication users, remember to change each users password before you run the generated script.
+--If there is only one account or only one password for multiple accounts then set the @PW variable.
+====================================================
+SET NOCOUNT ON
+
+DECLARE	@SQL		Varchar(MAX),
+		@PW			Varchar(50),
+		@NewSMTP	Varchar(15),
+		@Cmd		Varchar(50),
+		@TestPing	Bit
+SELECT	@SQL		= '',
+		@PW			= NULL,	-- Not all users have the same password!!
+		@NewSMTP	= NULL,	-- <Name, IP address. NULL to keep using the existing SMTP server.>
+		@TestPing	= 1
+
+-- Make sure the supplied SMTP server is online.
+IF @NewSMTP IS NOT NULL AND @TestPing = 1
+BEGIN
+	IF OBJECT_ID('TempDB..#TmpPing') IS NOT NULL
+		DROP TABLE #TmpPing
+
+	CREATE TABLE #TmpPing (PingResponse Varchar(8000))
+	
+	SET @Cmd = 'Ping ' + @NewSMTP + ' -n 1'
+	INSERT #TmpPing EXEC xp_CmdShell @Cmd
+
+	IF EXISTS	(	
+				SELECT	* 
+				FROM	#TmpPing 
+				WHERE	   PingResponse LIKE 'Ping request could not find host%' 
+						OR PingResponse LIKE '%TTL Expired in Transit%'
+						OR PingResponse LIKE '%Destination Host Unreachable%'
+						OR PingResponse LIKE '%Request Timed Out%'
+						OR PingResponse LIKE '%Unknown Host%'
+				)
+	BEGIN
+		PRINT 'The supplied SMTP server cannot be reached. Either it is unreachable, the name or IP is incorrect or pinging the server is not allowed.'
+		SELECT * FROM #TmpPing
+		RETURN
+	END
+END
+
+SELECT	@SQL = @SQL + -- Remove these @SQLs if have lots of accounts.
+'-- Delete the existing account
+EXEC	msdb.dbo.sysmail_delete_account_sp 
+		@account_name = '''+A.Name+'''
+GO
+
+-- Create an account
+EXEC	msdb.dbo.sysmail_add_account_sp
+			@account_name			= '''+A.Name+''',
+			@email_address			= '''+A.Email_Address+''',
+			@display_name			= '+CASE WHEN A.display_name	IS NULL THEN 'NULL' ELSE ''''+A.display_name+''''	END + ',
+			@replyto_address		= '+CASE WHEN A.ReplyTo_Address	IS NULL THEN 'NULL' ELSE ''''+A.ReplyTo_Address+''''END + ',
+			@description			= '+CASE WHEN A.[Description]	IS NULL THEN 'NULL' ELSE ''''+A.[Description]+''''	END + ',
+			@mailserver_name		= '''+ISNULL(@NewSMTP,S.ServerName)+''',
+			@mailserver_type		= '''+S.Servertype+''',
+			@port					= '''+CAST(S.Port AS Varchar)+''',
+			@username				= '+CASE WHEN S.UserName		IS NULL THEN 'NULL' ELSE ''''+S.UserName+'''' END + ',
+			@password				= '+CASE WHEN @PW				IS NULL THEN 'NULL' ELSE ''''+@PW+'''' END + ',
+			@use_default_credentials= '''+CAST(use_default_credentials AS Varchar)+''',
+			@enable_ssl				= '''+CAST(enable_ssl AS Varchar)+'''
+GO
+
+-- Add the account to a profile
+EXEC msdb.dbo.sysmail_add_profileaccount_sp
+			@profile_name	= '''+P.Name+''',
+			@account_name	= '''+A.Name+''',
+			@sequence_number= '+CAST(PA.Sequence_number AS Varchar) + '
+GO
+'
+--SELECT	* 
+FROM	msdb.dbo.sysmail_profile P
+		LEFT JOIN msdb.dbo.sysmail_principalprofile PP
+			ON P.profile_id = PP.profile_id
+		INNER JOIN msdb.dbo.sysmail_profileaccount PA
+			ON P.profile_id = PA.profile_id
+		INNER JOIN msdb.dbo.sysmail_account A
+			ON PA.account_id = A.account_id
+		INNER JOIN msdb.dbo.sysmail_server S
+			ON A.account_id = S.account_id
+
+PRINT	@SQL
