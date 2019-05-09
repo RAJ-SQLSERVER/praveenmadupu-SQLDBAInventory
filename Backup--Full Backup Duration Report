@@ -1,0 +1,47 @@
+--Backup--Full Backup Duration Report
+--You can run this script on SQL Server 2000, 2005 and 2008 instances, this script is usefull 
+--to plan the downtime for server while any maintenance activity or any adhoc activity that leads to server reboot.
+
+set nocount on
+go
+if exists ( select name from tempdb..sysobjects where name like '#DatabasesBackupsDuration%')
+drop table #DatabasesBackupsDuration
+go
+create table #DatabasesBackupsDuration
+(
+	ServerName varchar(100) null,
+	DBName varchar(100) null,
+	RecoveryModel varchar(100) null,
+	LastFullbackup datetime null,
+	FullbackupDurationSec bigint null,
+	DBStatus varchar (100) null,
+	
+)
+go
+insert into #DatabasesBackupsDuration(ServerName,DBName)
+select convert(varchar,serverproperty('ServerName')),a.name 
+from master.dbo.sysdatabases a
+where a.name <> 'tempdb'
+
+update #DatabasesBackupsDuration
+set LastFullbackup=b.backup_start_date
+from #DatabasesBackupsDuration a,(select database_name,max(backup_start_date) backup_start_date 
+from msdb..backupset  where type='D' group by database_name)b
+where a.DBName=b.database_name
+
+update #DatabasesBackupsDuration 
+set RecoveryModel=convert(sysname,DatabasePropertyEx(DBName,'Recovery'))
+
+update #DatabasesBackupsDuration 
+set DBStatus=convert(sysname,DatabasePropertyEx(DBName,'Status'))
+
+update d
+set d.FullbackupDurationSec = datediff(s,backup_start_date, backup_finish_date)
+from #DatabasesBackupsDuration d,(select database_name, max(backup_start_date) as backup_start_date, max(backup_finish_date) as backup_finish_date from msdb..backupset 
+where type ='D' group by database_name) b where d.DBName = b.database_name
+go
+select * from #DatabasesBackupsDuration order by LastFullbackup
+go
+select CAST(SUM(FullbackupDurationSec)/60 AS varchar(100))+' Minutes' As FullBackupTimeTotal from #DatabasesBackupsDuration
+go	
+drop table #DatabasesBackupsDuration
