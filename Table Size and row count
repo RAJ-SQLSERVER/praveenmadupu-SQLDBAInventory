@@ -1,0 +1,20 @@
+--Table Size and row count
+
+USE DBNAME -- Put your required DB Name here
+go
+if exists(select * from tempdb..sysobjects where id = OBJECT_ID('#temp_table1'))
+  drop table #temp_table1 
+  GO
+  
+  select B.name,CONVERT(numeric(30,3),(CONVERT(float, SUM(A.used_page_count)*8)/1024)) as [Table Used Size(MB)],
+  CONVERT(numeric(30,3),(CONVERT(float, SUM(A.reserved_page_count)*8)/1024)) as [Table Located Size(MB)],
+  (CONVERT(numeric(30,3),(CONVERT(float, SUM(A.reserved_page_count)*8)/1024)) - CONVERT(numeric(30,3),(CONVERT(float, SUM(A.used_page_count)*8)/1024))) as [Table Free Size(MB)] ,
+  A.row_count
+  into #temp_table1
+  from sys.dm_db_partition_stats as A, sys.all_objects as B
+  where A.object_id = B.object_id and B.type != 'S'
+  group by name,row_count
+  order by B.name asc
+  
+  Select * from #temp_table1
+  drop table #temp_table1
