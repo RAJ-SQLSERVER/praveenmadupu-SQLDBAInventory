@@ -1,0 +1,72 @@
+--Backup--Backup Status for an SQL Instance
+--You can run this script on various sql intances like SQL 2000, 2005 and 2008. 
+--By running this as multiserver query using CMS, you can generate the backup report for all 
+--your SQL Server Instances those are registered in CMS.
+
+set nocount on
+go
+if exists ( select name from tempdb..sysobjects where name like '#DatabasesBackupsStatus%')
+drop table #DatabasesBackupsStatus
+GO
+create table #DatabasesBackupsStatus
+(
+	ServerName varchar(100) null,
+	DBName varchar(100) null,
+	RecoveryModel varchar(100) null,
+	LastFullbackup datetime null,
+	days_since_Lastfullbackup int null,
+	days_since_Lastdiffbackup int null,
+	HOURS_since_LastLogbackup int,
+	DBStatus varchar (100) null,
+	FullBackupLocation varchar(1000) null,
+	MEDIASET INT,
+	JobOwner varchar(100) null
+	
+)
+Go
+insert into #DatabasesBackupsStatus(ServerName,DBName)
+select convert(varchar,serverproperty('ServerName')),a.name 
+from master.dbo.sysdatabases a
+where a.name <> 'tempdb'
+
+update #DatabasesBackupsStatus
+set LastFullbackup=b.backup_start_date,
+	days_since_Lastfullbackup=datediff(dd,b.backup_start_date,getdate()),
+	MEDIASET=b.media_set_id
+from #DatabasesBackupsStatus a,(select database_name,MAX(media_set_id)media_set_id,max(backup_start_date) backup_start_date 
+from msdb..backupset  where type='D' group by database_name)b
+where a.DBName=b.database_name
+
+update #DatabasesBackupsStatus 
+set RecoveryModel=convert(sysname,DatabasePropertyEx(DBName,'Recovery'))
+
+update #DatabasesBackupsStatus 
+set DBStatus=convert(sysname,DatabasePropertyEx(DBName,'Status'))
+
+update d
+set d.FullBackupLocation=b.physical_device_name
+from #DatabasesBackupsStatus d , msdb..backupmediafamily b
+where d.MEDIASET =b.media_set_id
+
+
+update d 
+set d.days_since_Lastdiffbackup=datediff(dd,b.backup_finish_date,getdate())
+from #DatabasesBackupsStatus d , (select database_name,max(backup_finish_date) backup_finish_date 
+from msdb..backupset where type ='I'  group by database_name) b
+where d.DBName = b.database_name
+
+update d 
+set d.JobOwner=b.[user_name]
+from #DatabasesBackupsStatus d , msdb..backupset b
+where d.MEDIASET = b.media_set_id
+
+update d 
+set d.HOURS_since_LastLogbackup=datediff(hh,b.backup_finish_date,getdate())
+from #DatabasesBackupsStatus d , (select database_name,max(backup_finish_date) backup_finish_date 
+from msdb..backupset where type ='L'  group by database_name) b
+where d.DBName = b.database_name
+AND d.RecoveryModel != 'SIMPLE'
+Go
+select * from #DatabasesBackupsStatus
+Go
+drop table #DatabasesBackupsStatus
