@@ -1,0 +1,144 @@
+--Query accounts, domain groups, and members who have admin membership.
+
+--https://www.sqlservercentral.com/articles/query-accounts-domain-groups-and-members-who-have-admin-membership
+
+--Ideally only members within your DBA team are members of the SQL Server sysadmin role. 
+--If we see an account belonging to an application, 3rd party tool, or user, 
+--then we must consider whether or not full admin permissions are really needed. 
+--For example, SQL Server version 2005 and earlier would by default add the local Windows group BUILTIN\Administrators 
+--to the sysadmin role, and we will see this occur on a lot of older or migrated installations. 
+--However, an administrator on the server may not be responsible for administrating the SQL Server instance hosted on the server.
+--The following script returns accounts, domain groups, and domain group members who have been granted or 
+--inherited membership in a SQL Server fixed admin role. The system view master.sys.server_principals won’t reveal what 
+--domain accounts are members of a domain group, so this script leverages the system stored procedure xp_logininfo to expand the result.
+===================================================================================
+
+set xact_abort off;
+set nocount on;
+declare @principals table
+(
+ primary key ( principal_type, principal_name, member_name ),
+ principal_type varchar(180) not null,
+ principal_name varchar(180) not null,
+ member_name varchar(180) not null,
+ create_date datetime null,
+ modify_date datetime null,
+ admin_role_desc varchar(180) null,
+ logininfo_note varchar(8000) null
+);
+-- insert all accounts and groups into result:
+insert into @principals
+select
+ type_desc,
+ name,
+ '-' as member_name,
+ create_date,
+ modify_date,
+ (
+  case is_srvrolemember('sysadmin',name) when 1 then 'sysadmin|' else null end
+  + case is_srvrolemember('securityadmin',name) when 1 then 'securityadmin|' else null end
+  + case is_srvrolemember('serveradmin',name) when 1 then 'serveradmin|' else null end
+  + case is_srvrolemember('setupadmin',name) when 1 then 'setupadmin|' else null end  
+  + case is_srvrolemember('processadmin',name) when 1 then 'processadmin|' else null end  
+  + case is_srvrolemember('diskadmin',name) when 1 then 'diskadmin|' else null end  
+  + case is_srvrolemember('dbcreator',name) when 1 then 'dbcreator|' else null end  
+  + case is_srvrolemember('bulkadmin',name) when 1 then 'bulkadmin|' else null end
+ ) as admin_role_desc,
+ null as logininfo_note
+from sys.server_principals
+;
+declare @admin_groups table
+(
+ primary key ( group_type, group_name ),
+ group_type varchar(180) not null,
+ group_name varchar(180) not null
+);
+declare @logininfo table
+(
+ primary key ( account_name, permission_path ),
+ account_name varchar(180) not null,
+ type varchar(180) null,
+ privilege varchar(180) null,
+ mapped_login_name varchar(180) null,
+ permission_path varchar(180) not null
+);
+-- For each domain group with admin privilages,
+-- insert one record for each of it's member accounts into the result:
+declare @group_type varchar(180), @group_name varchar(180);
+select @group_type = '*', @group_name = '*';
+while @group_name is not null
+begin
+ select @group_type = null, @group_name = null;
+ select top 1 @group_type = principal_type, @group_name = principal_name
+  from @principals
+   where principal_type in ('windows_group')
+    and member_name = '-'      
+    and admin_role_desc is not null
+    and principal_name not in (select group_name from @admin_groups);
+ if @group_name is not null
+ begin
+  -- Call xp_logininfo to return all domain accounts belonging to group:
+  insert @admin_groups values (@group_type, @group_name);
+  begin try
+   delete from @logininfo;
+   insert into @logininfo
+    exec master..xp_logininfo @group_name,'members';
+   -- Update number of members for group to logininfo_note:
+     update @principals
+    set logininfo_note = 'xp_logininfo returned '+cast(@@rowcount as varchar(9))+' members.'
+     where principal_type in ('windows_group')
+      and principal_name = @group_name
+      and member_name = '-';   
+  end try
+  begin catch
+   -- If an error occurred, then update it to logininfo_note, and then continue:
+     update @principals
+    set logininfo_note = 'xp_logininfo returned error '+cast(error_number() as varchar(9))
+     where principal_type in ('windows_group')
+      and principal_name = @group_name
+      and member_name = '-';
+  end catch
+  -- For each group member, insert a record into the result:
+  insert into @principals
+  select
+   @group_type as principal_type,
+   @group_name as principal_name,
+   account_name as member_name,
+   null as create_date,
+   null as modify_date,
+   (select admin_role_desc
+    from @principals
+     where principal_type = @group_type
+     and principal_name = @group_name
+     and member_name = '-') as admin_role_desc,
+   null as logininfo_note
+  from @logininfo;
+  -- For each group member that is a group,
+  -- insert a record of type 'WINDOWS_GROUP' into the result:
+  insert into @principals
+  select
+   'WINDOWS_GROUP' as principal_type,
+   account_name as principal_name,
+   '-' as member_name,
+   null as create_date,
+   null as modify_date,
+   (select admin_role_desc
+    from @principals
+     where principal_type = @group_type
+     and principal_name = @group_name
+     and member_name = '-') as admin_role_desc,
+   null as logininfo_note
+  from @logininfo
+   where type = 'group'
+   and not exists
+    (select 1
+     from @principals
+      where principal_type = 'WINDOWS_GROUP' and principal_name = account_name and member_name = '-'
+    );
+ end; 
+end;
+-- Return result of only those accounts, groups, and members who have an admin role:
+select principal_type, principal_name, logininfo_note, member_name, create_date, modify_date, admin_role_desc
+ from @principals
+  where admin_role_desc is not null
+   order by principal_type, principal_name, member_name;
