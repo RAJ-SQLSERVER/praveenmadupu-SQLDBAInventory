@@ -1,0 +1,205 @@
+--Table--Scripting CREATE INDEX Statements Automatically From Your Tables
+--https://www.sqlservercentral.com/scripts/scripting-create-index-statements-automatically-from-your-tables
+==============================================================
+Just thought I'd share a script I wrote recently to get full CREATE INDEX statements (including filters, 
+filegroup information and all the WITH options) from existing indexes you have.  
+This is useful when duplicating tables, e.g. when you use SELECT * INTO... you'll find you leave your NC indexes behind.  
+Or if you're dropping some indexes and want to be able to recreate them in a hurry.
+
+When I Googled for this I couldn't find a single satisfactory solution to this problem, so here's mine.  
+Tested OK, read all the comments and if you want to test it for yourself, you'll find some test code to create sample objects 
+at the end of the code segment.
+==============================================================
+ALTER PROCEDURE dbo.recreateIndexes
+	(	@schema_name VARCHAR(100) = NULL, @table_name VARCHAR(MAX) = NULL,
+		@sort_in_tempdb BIT = 0, @statistics_norecompute BIT = 0, @drop_existing BIT = 0, @online BIT = 0, 
+		@maxdop TINYINT = 1, @data_compression BIT = 0, @data_compression_type VARCHAR(4) = 'NONE' )
+AS BEGIN
+
+/*
+      Title:		recreateIndexes
+      Summary:		Procedure to script out full CREATE INDEX statements for non-clustered indexes.
+      Author:		Derek Colley, derek@derekcolley.co.uk, blog: http://uksqldba.blogspot.com
+      Date:			18/10/2012
+      ---
+      Parameters:	@schema_name VARCHAR(100) -- the schema name of the table to find indexes for, optional.
+					@table_name VARCHAR(MAX) -- the table name of the table to find indexes for, optional.
+					@sort_in_tempdb BIT = 0 -- defines whether or not to create the index using TEMPDB
+					@statistics_norecompute BIT = 0 -- defines whether to UPDATE STATISTICS after index creation
+					@drop_existing BIT = 0 -- specifies whether to drop an existing index of the same name
+					@online BIT = 0 -- specifies whether to do the operation online (unavailable sub-Enterprise edition)
+					@maxdop TINYINT = 1 -- max degree of parallelism, play with this at your peril
+					@data_compression BIT = 0 -- whether you want data compression on your indexes
+					@data_compression_type VARCHAR(4) = 'NONE' -- valid parameters are 'NONE', 'PAGE', 'ROW'.  Set @data_compression = 1 too.
+					
+      Behaviour:	Returns full CREATE INDEX statements to console (Messages tab).
+      
+      Limitations:	1) Although some WITH parameters are drawn from sys.indexes, the procedure parameters are set in stone for all indexes.
+					2) I'm using a cursor :-(
+					3) Limited to NONCLUSTERED indexes only at present.  To be fair your CLUSTERED index should be scripted at CREATE TABLE time.
+	  
+	  Misc:			1) I have included some commented-out test code you can use to create some indexes to test this procedure on.
+					2) I've not included functionality to pick a database or (linked) server, simple enough so mod if you like.
+					3) Use this procedure at your own risk, ALWAYS test on your test/QA BEFORE deploying to production.
+					4) If you find any errors or can improve upon this code, tell me!  E-mail address above.
+					5) Tested on SQL Server Std Ed 2008 SP2 successfully.
+					
+*/
+
+
+IF EXISTS (SELECT * FROM [tempdb].[sys].[objects] WHERE [name] LIKE '#indexProperties%')
+	DROP TABLE #indexProperties
+
+SELECT		SCHEMA_NAME(t.[schema_id]) [schema_name],
+			t.[name] [table_name],
+			i.[name] [index_name],
+			c.[name] [column_name],
+			ic.key_ordinal [column_position],
+			i.[type_desc] [index_type],
+			i.fill_factor [fill_factor], 
+			i.is_padded [is_padded], 
+			i.is_disabled [is_disabled], 
+			i.[allow_row_locks] [allow_row_locks], 
+			i.[allow_page_locks] [allow_page_locks], 
+			i.has_filter [has_filter], 
+			i.filter_definition [filter_definition],
+			ic.is_included_column [is_included],
+			ic.is_descending_key [is_descending_key],
+			i.[ignore_dup_key] [ignore_dup_key],
+			i.data_space_id [data_space_id]
+INTO		#indexProperties
+FROM		sys.indexes i
+INNER JOIN	sys.tables t ON i.[object_id] = t.[object_id]
+INNER JOIN	sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
+INNER JOIN	sys.columns c ON t.object_id = c.object_id AND ic.column_id = c.column_id
+WHERE		i.[name] IS NOT NULL
+AND			i.type_desc = 'NONCLUSTERED' 
+AND			SCHEMA_NAME(t.[schema_id]) = CASE WHEN @schema_name IS NULL THEN SCHEMA_NAME(t.[schema_id]) ELSE @schema_name END
+AND			t.[name] = CASE WHEN @table_name IS NULL THEN t.[name] ELSE @table_name END 
+ORDER BY	i.[name], ic.index_column_id ASC
+
+DECLARE @schemaName VARCHAR(MAX), @tableName VARCHAR(MAX), @indexName VARCHAR(MAX)
+DECLARE @colList VARCHAR(MAX), @includedColList VARCHAR(MAX), @withOptions VARCHAR(MAX)
+DECLARE @fillFactor INT, @is_padded BIT, @is_disabled BIT, @allow_page_locks BIT, @allow_row_locks BIT
+DECLARE @is_filtered BIT, @filterDefinition VARCHAR(MAX), @ignoredupkey BIT, @filegroup VARCHAR(100)
+DECLARE cur_ForEachIndex CURSOR LOCAL FAST_FORWARD
+FOR SELECT DISTINCT ip.[schema_name], ip.[table_name], ip.[index_name] FROM #indexProperties ip
+OPEN cur_ForEachIndex
+FETCH NEXT FROM cur_ForEachIndex INTO @schemaName, @tableName, @indexName
+WHILE @@FETCH_STATUS = 0 BEGIN
+	-- aggregate the main columns
+	SELECT		@colList = ISNULL(@colList,'') + ip.[column_name] + ', '
+	FROM		#indexProperties ip
+	WHERE		ip.[schema_name] = @schemaName 
+	AND			ip.[table_name] = @tableName 
+	AND			ip.index_name = @indexName
+	AND			ip.is_included = 0
+	ORDER BY	ip.column_position ASC
+	-- trim the trailing comma
+	SET			@colList = LEFT(@colList,(LEN(@colList) - 1))
+	-- aggregate the included columns
+	SELECT		@includedColList = ISNULL(@includedColList,'') + ip.[column_name] + ', '
+	FROM		#indexProperties ip
+	WHERE		ip.[schema_name] = @schemaName 
+	AND			ip.[table_name] = @tableName 
+	AND			ip.index_name = @indexName
+	AND			ip.is_included = 1
+	-- trim the trailing comma
+	SET			@includedColList = LEFT(@includedColList,(LEN(@includedColList) - 1 ))
+	-- now get special options per index
+	SELECT		@fillFactor = ip.fill_factor,
+				@is_padded = ip.is_padded,
+				@is_disabled = ip.is_disabled,
+				@allow_row_locks = ip.[allow_row_locks],
+				@allow_page_locks = ip.[allow_page_locks],
+				@is_filtered = ip.[has_filter],
+				@filterDefinition = ip.[filter_definition],
+				@ignoredupkey = ip.[ignore_dup_key],
+				@filegroup = fg.[name]
+	FROM		#indexProperties ip
+	LEFT JOIN	sys.filegroups fg ON ip.data_space_id = fg.data_space_id
+	WHERE		ip.[schema_name] = @schemaName 
+	AND			ip.[table_name] = @tableName 
+	AND			ip.index_name = @indexName		
+	
+	-- deliver an output
+	PRINT 			'CREATE NONCLUSTERED INDEX [' + @indexName + '] ON [' + @schemaName + '].[' + @tableName + '] (' + @colList + ') '
+					+ CASE WHEN @includedColList IS NOT NULL THEN ' INCLUDE (' + @includedColList + ') ' ELSE '' END 
+					+ CASE WHEN @is_filtered = 1 THEN ' WHERE ( ' + @filterDefinition + ' ) ' ELSE '' END 
+					+ ' WITH ( PAD_INDEX = ' + CASE WHEN @is_padded = 1 THEN 'ON,' ELSE 'OFF,' END
+					+ ' FILLFACTOR = ' + CASE WHEN @fillfactor = 0 THEN '100' ELSE CAST((ISNULL(CAST(@fillfactor AS INT),100)) AS VARCHAR(3)) END + ', '
+					+ ' IGNORE_DUP_KEY = ' + CASE WHEN @ignoredupkey = 1 THEN 'ON,' ELSE 'OFF,' END
+					+ ' ALLOW_ROW_LOCKS = ' + CASE WHEN @allow_row_locks = 1 THEN 'ON,' ELSE 'OFF,' END
+					+ ' ALLOW_PAGE_LOCKS = ' + CASE WHEN @allow_page_locks = 1 THEN 'ON,' ELSE 'OFF,' END
+					+ ' SORT_IN_TEMPDB = ' + CASE WHEN @sort_in_tempdb = 1 THEN 'ON,' ELSE 'OFF,' END 
+					+ ' STATISTICS_NORECOMPUTE = ' + CASE WHEN @statistics_norecompute = 1 THEN 'ON,' ELSE 'OFF,' END
+					+ ' DROP_EXISTING = ' + CASE WHEN @drop_existing = 1 THEN 'ON,' ELSE 'OFF,' END 
+					+ ' ONLINE = ' + CASE WHEN @online = 1 THEN 'ON,' ELSE 'OFF,' END
+					+ ' MAXDOP = ' + CAST((ISNULL(CAST(@maxdop AS INT),0)) AS VARCHAR(1)) + ', '
+					+ ' DATA_COMPRESSION = ' + CASE WHEN @data_compression = 1 THEN QUOTENAME(@data_compression_type,'''') ELSE 'NONE' END 
+					+ ' );'		 
+					
+	-- reset and increment
+	SET			@colList = NULL
+	SET			@includedColList = NULL
+	FETCH NEXT FROM cur_ForEachIndex INTO @schemaName, @tableName, @indexName END
+
+---- BEGINNING OF TEST CODE
+
+	--CREATE SCHEMA test
+	--GO
+
+	--CREATE TABLE test.TableWithIndexes (
+	--	productId		INT PRIMARY KEY NOT NULL,
+	--	productName		VARCHAR(100) NOT NULL,
+	--	colour			VARCHAR(20) NULL,
+	--	dateAvailable	DATE NULL,
+	--	price			MONEY NULL,
+	--	discontinued	BIT DEFAULT 0 NULL
+	--	)
+		
+	--INSERT INTO test.TableWithIndexes
+	--VALUES	(1, 'Defrabuliser', 'Blue', '2009-04-30', 19.99, 0),
+	--			(15, 'Unbobulator', 'Green', '2012-01-13', 85.00, 0),
+	--			(22, 'Disbibulator', NULL, '2012-11-18', 12.50, 0),
+	--			(89, 'Bishbosher', 'Orange', '2008-05-23', 109.99, 1),
+	--			(101, 'Jambasher', 'Yellow', '2001-03-03', 3.99, 0)
+
+	---- create PK/clustered index with padding/fill factor
+	--ALTER TABLE test.TableWithIndexes ADD CONSTRAINT ix_pk_productId PRIMARY KEY CLUSTERED (productId) 
+	--WITH (PAD_INDEX  = ON, FILLFACTOR=90)
+
+	---- create non-clustered non-covering indexes with single column
+	--CREATE INDEX ix_nc_productName ON test.TableWithIndexes (productName)
+	--CREATE INDEX ix_nc_dateAvailable ON test.TableWithIndexes (dateAvailable)
+
+	---- create non-clustered non-covering index with multiple columns
+	--CREATE INDEX ix_nc_productName_price ON test.TableWithIndexes (productName, price)
+
+	---- create non-clustered covering index with multiple columns and INCLUDEs
+	--CREATE INDEX ix_nc_productId_productName_dateAvailable_iPrice_iDiscontinued ON test.TableWithIndexes (productId, productName, dateAvailable)
+	--INCLUDE ( price, discontinued )
+
+	---- create non-clustered filtered covering index with an INCLUDE
+	--CREATE INDEX ix_nc_productId_iPrice_filtered ON test.TableWithIndexes ( productId ) INCLUDE ( price ) WHERE ( price < 10 ) 
+
+	---- execute the procedure
+	--EXEC dbo.recreateIndexes
+	
+	---- now test the indexes work!
+	--DROP INDEX [ix_nc_dateAvailable] ON test.TableWithIndexes
+	--DROP INDEX [ix_nc_productId_iPrice_filtered] ON test.TableWithIndexes
+	--DROP INDEX [ix_nc_productId_productName_dateAvailable_iPrice_iDiscontinued] ON test.TableWithIndexes
+	--DROP INDEX [ix_nc_productName] ON test.TableWithIndexes
+	--DROP INDEX [ix_nc_productName_price] ON test.TableWithIndexes
+
+	---- pasted from Messages tab
+	--CREATE NONCLUSTERED INDEX [ix_nc_dateAvailable] ON [test].[TableWithIndexes] (dateAvailable)  WITH ( PAD_INDEX = OFF, FILLFACTOR = 100,  IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, SORT_IN_TEMPDB = OFF, STATISTICS_NORECOMPUTE = OFF, DROP_EXISTING = OFF, ONLINE = OFF, MAXDOP = 1,  DATA_COMPRESSION = NONE );
+	--CREATE NONCLUSTERED INDEX [ix_nc_productId_iPrice_filtered] ON [test].[TableWithIndexes] (productId)  INCLUDE (price)  WHERE ( ([price]<(10)) )  WITH ( PAD_INDEX = OFF, FILLFACTOR = 100,  IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, SORT_IN_TEMPDB = OFF, STATISTICS_NORECOMPUTE = OFF, DROP_EXISTING = OFF, ONLINE = OFF, MAXDOP = 1,  DATA_COMPRESSION = NONE );
+	--CREATE NONCLUSTERED INDEX [ix_nc_productId_productName_dateAvailable_iPrice_iDiscontinued] ON [test].[TableWithIndexes] (productId, productName, dateAvailable)  INCLUDE (price, discontinued)  WITH ( PAD_INDEX = OFF, FILLFACTOR = 100,  IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, SORT_IN_TEMPDB = OFF, STATISTICS_NORECOMPUTE = OFF, DROP_EXISTING = OFF, ONLINE = OFF, MAXDOP = 1,  DATA_COMPRESSION = NONE );
+	--CREATE NONCLUSTERED INDEX [ix_nc_productName] ON [test].[TableWithIndexes] (productName)  WITH ( PAD_INDEX = OFF, FILLFACTOR = 100,  IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, SORT_IN_TEMPDB = OFF, STATISTICS_NORECOMPUTE = OFF, DROP_EXISTING = OFF, ONLINE = OFF, MAXDOP = 1,  DATA_COMPRESSION = NONE );
+	--CREATE NONCLUSTERED INDEX [ix_nc_productName_price] ON [test].[TableWithIndexes] (productName, price)  WITH ( PAD_INDEX = OFF, FILLFACTOR = 100,  IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, SORT_IN_TEMPDB = OFF, STATISTICS_NORECOMPUTE = OFF, DROP_EXISTING = OFF, ONLINE = OFF, MAXDOP = 1,  DATA_COMPRESSION = NONE );
+		
+-- END OF TEST CODE
+
+END
