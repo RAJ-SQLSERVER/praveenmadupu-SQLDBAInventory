@@ -1,0 +1,38 @@
+--DB-Refresh--Create a copy of database with a new name on the Same SQL Instance.
+
+--attached one of the dynamic scripts which help you create a backup and copy it to a new database.
+--To use the same please change the below information as required.
+================================================================
+DECLARE @FirstDBName NVARCHAR(100),@NewDBName NVARCHAR(100),@BackupLocation NVARCHAR(100),@fileName NVARCHAR(1000)
+SELECT @FirstDBName = 'Mitesh_Dev' – existing DB Name ,
+@NewDBName = 'mitesh_Dev01' – Required db name ,
+@BackupLocation= 'C:\Backup\'—Back Up Location
+================================================================
+
+--Actual Script
+
+USE MASTER
+GO
+DECLARE @FirstDBName NVARCHAR(100),@NewDBName NVARCHAR(100),@BackupLocation NVARCHAR(100),@fileName NVARCHAR(1000)
+
+SELECT @FirstDBName = 'Mitesh01',
+       @NewDBName = 'Mitesh02',
+       @BackupLocation= 'C:\Backup\'
+
+SELECT @fileName =  @BackupLocation+@FirstDBName+REPLACE(REPLACE(REPLACE(CONVERT(VARCHAR(16),SYSDATETIMEOFFSET(),120),'-',''),':',''),' ','')+'.bak'
+
+BACKUP DATABASE @FirstDBName TO DISK = @fileName
+
+DECLARE @SQL NVARCHAR(MAX) = N'RESTORE DATABASE @NewDBName FROM  DISK = @fileName WITH  FILE = 1, '
+DECLARE @ParamterDefination NVARCHAR(MAX)		= '@NewDBName NVARCHAR(100),@fileName NVARCHAR(1000)'
+
+--SELECT +N'MOVE N'''+Name+''' TO N'''+REPLACE(filename,Name,@NewDBName+'_'+Name)+''',' FROM [master].sys.sysaltfiles where DBID = DB_ID(@FirstDBName)
+
+SELECT  @SQL = @SQL +	CHAR(13)+CHAR(10)+N'MOVE N'''+Name+''' TO N'''+SUBSTRING(filename,0,LEN(filename)-CHARINDEX('\',REVERSE(filename))+2)+@NewDBName
+					+	'_'+Name+RIGHT(filename,CHARINDEX('.',REVERSE(filename)))+''','
+
+ FROM  [master].sys.sysaltfiles where DBID = DB_ID(@FirstDBName)
+
+SELECT   @SQL = @SQL+CHAR(13)+CHAR(10)+N'NOUNLOAD,  STATS = 5  '
+
+EXEC SP_EXECUTESQL @SQL,@ParamterDefination, @NewDBName = @NewDBName,@fileName= @fileName
