@@ -1,0 +1,54 @@
+--DeadLock--View Deadlock Graphs
+--Run this script on the server that is generating deadlock traces. It assumes that the trace file will have the name "Deadlock" 
+--somewhere in it's filename.
+--You can optionally set the file to be loaded.
+--When you run this script, it will shred the XML deadlock graph, and display information contained within it in a table format.
+==============================
+-- get information about all traces
+-- select * from ::fn_trace_getinfo(0)
+
+-- declare variables.
+declare @trace_id int,
+ @file nvarchar(256)
+ 
+-- get the traceid and file for the first deadlock trace that is running.
+-- assumes that the deadlock trace will have the name "Deadlock" in it's filename. 
+select top 1
+ @trace_id = traceid,
+ @file = convert(nvarchar(256), value)
+ from ::fn_trace_getinfo(0)
+where property = 2
+ and convert(nvarchar(256), value) like N'%Deadlock%'
+
+-- you can set the @file variable manually here if you want to view an older trace file
+-- set @file = ''
+
+
+;with CTE as
+(
+select 
+ [TraceID] = @trace_id , 
+ [RowID] = row_number() OVER (ORDER BY StartTime), -- assign a row number to each deadlock
+ [DeadlockGraph]=case when TextData like '<deadlock-list%' then convert(xml, TextData) else null end, 
+ * 
+ from ::fn_trace_gettable(@file, default)
+where TextData like '<deadlock-list%'
+)
+select 
+ [TimeoutID] = CTE.RowID,
+ [DeadlockTime] = [StartTime],
+ [DeadlockGraph],
+ [PagelockObject] = CTE.[DeadlockGraph].value('/deadlock-list[1]/deadlock[1]/resource-list[1]/pagelock[1]/@objectname', 'varchar(200)'),
+ [DeadlockObject] = CTE.[DeadlockGraph].value('/deadlock-list[1]/deadlock[1]/resource-list[1]/objectlock[1]/@objectname', 'varchar(200)'),
+ [Victim] = case when Deadlock.Process.value('@id', 'varchar(50)') = CTE.[DeadlockGraph].value('/deadlock-list[1]/deadlock[1]/@victim', 'varchar(50)') then 1 else 0 end,
+ [Procedure] = Deadlock.Process.value('executionStack[1]/frame[1]/@procname[1]', 'varchar(200)'),
+ [LockMode] = Deadlock.Process.value('@lockMode', 'char(1)'),
+ [Code] = Deadlock.Process.value('executionStack[1]/frame[1]', 'varchar(1000)'),
+ [ClientApp] = Deadlock.Process.value('@clientapp', 'varchar(100)'),
+ [HostName] = Deadlock.Process.value('@hostname', 'varchar(20)'),
+ [LoginName] = Deadlock.Process.value('@loginname', 'varchar(20)'),
+ [TransactionTime] = Deadlock.Process.value('@lasttranstarted', 'datetime'),
+ [InputBuffer] = Deadlock.Process.value('inputbuf[1]', 'varchar(1000)')
+ from CTE
+ CROSS APPLY CTE.[DeadlockGraph].nodes('/deadlock-list/deadlock/process-list/process') as Deadlock(Process)
+-- ORDER BY [DeadlockObject], [ClientApp], [Procedure], [Code]
