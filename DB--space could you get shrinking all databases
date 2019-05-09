@@ -1,0 +1,281 @@
+--DB--space could you get shrinking all databases
+--This is script is useful when you are short of space on a drive and you need to know how much space can you get shrinking your databases. Although is shrinking is not a recommended practice some times you need to get free space in your drive. Just execute the script and it will tell you the free space you can obtain.
+--You gan modify the line where[UsageType] = 'data'  to specify log or data files.
+--As well you can uncomment the line --where MB_Free < 5000 to specify drives with less than 'x mbytes'.
+--https://www.sqlservercentral.com/scripts/how-much-space-could-you-get-shrinking-all-databases
+
+begin 
+    
+    set nocount on 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#dbfileinfo')) 
+      begin 
+          drop table #dbfileinfo 
+      end 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#logsizestats')) 
+      begin 
+          drop table #logsizestats 
+      end 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#datafilestats')) 
+      begin 
+          drop table #datafilestats 
+      end 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#fixeddrives')) 
+      begin 
+          drop table #fixeddrives 
+      end 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#usados')) 
+      begin 
+          drop table #usados 
+      end 
+
+    create table #fixeddrives 
+      ( 
+         DriveLetter varchar(10), 
+         MB_Free     dec(20, 2) 
+      ) 
+
+    create table #datafilestats 
+      ( 
+         DBName       varchar(255), 
+         DBId         int, 
+         FileId       tinyint, 
+         [FileGroup]  tinyint, 
+         TotalExtents dec(20, 2), 
+         UsedExtents  dec(20, 2), 
+         [Name]       varchar(255), 
+         [FileName]   varchar(400) 
+      ) 
+
+    create table #logsizestats 
+      -- DBCC SQLPERF -- Provides statistics about how the transaction-log space was used in all databases. It can also be used to reset wait and latch statistics.
+       ( 
+         DBName      varchar(255) not null primary key clustered, 
+         -- Database Name -- Name of the database for the log statistics displayed.
+          DBId        int, 
+         LogFile     real, 
+         -- Log Size (MB) -- Actual amount of space available for the log. This amount is smaller than the amount originally allocated for log space because the SQL Server 2005 Database Engine reserves a small amount of disk space for internal header information.
+          LogFileUsed real, 
+         -- Log Space Used (%) -- Percentage of the log file currently occupied with transaction log information.
+          Status      bit 
+      ) -- Status -- Status of the log file. Always 0. 
+    create table #dbfileinfo 
+      ( 
+         [ServerName]        varchar(255), 
+         [DBName]            varchar(65), 
+         [LogicalFileName]   varchar(400), 
+         [UsageType]         varchar (30), 
+         [Size_MB]           dec(20, 2), 
+         [SpaceUsed_MB]      dec(20, 2), 
+         [MaxSize_MB]        dec(20, 2), 
+         [NextAllocation_MB] dec(20, 2), 
+         [GrowthType]        varchar(65), 
+         [FileId]            smallint, 
+         [GroupId]           smallint, 
+         [PhysicalFileName]  varchar(400), 
+         [DateChecked]       datetime 
+      ) 
+
+    declare @SQLString varchar(3000) 
+    declare @MinId int 
+    declare @MaxId int 
+    declare @DBName varchar(255) 
+    declare @tblDBName table ( 
+      RowId  int identity(1, 1), 
+      DBName varchar(255), 
+      DBId   int) 
+
+    insert into @tblDBName 
+                (DBName, 
+                 DBId) 
+    select [Name], 
+           DBId 
+    from   master..sysdatabases 
+    where  ( Status & 512 ) = 0 /*NOT IN (536,528,540,2584,1536,512,4194841)*/ 
+    order  by [Name] 
+
+    insert into #logsizestats 
+                (DBName, 
+                 LogFile, 
+                 LogFileUsed, 
+                 Status) 
+    exec ('dbcc sqlperf(logspace) with no_infomsgs') 
+
+    update #logsizestats 
+    set    DBId = db_id(DBName) 
+
+    insert into #fixeddrives 
+    exec master..xp_fixeddrives 
+
+    select @MinId = min(RowId), 
+           @MaxId = max(RowId) 
+    from   @tblDBName 
+
+    while ( @MinId <= @MaxId ) 
+      begin 
+          select @DBName = [DBName] 
+          from   @tblDBName 
+          where  RowId = @MinId 
+
+          select @SQLString = 'SELECT ServerName = @@SERVERNAME,' + 
+                              ' DBName = ''' + 
+                              @DBName + 
+                                     ''',' + 
+                                                  ' LogicalFileName = [name],' +
+       ' UsageType = CASE WHEN (64&[status])=64 THEN ''Log'' ELSE ''Data'' END,'
+                    + 
+                          ' Size_MB = [size]*8/1024.00,' + 
+                   ' SpaceUsed_MB = NULL,' + 
+-- 20081125 Arithmetic overflow error converting expression to data type int. 
+-- ' MaxSize_MB = CASE [maxsize] WHEN -1 THEN -1 WHEN 0 THEN [size]*8/1024.00 ELSE maxsize*8/1024.00 END,'+
+ ' MaxSize_MB = CASE [maxsize] WHEN -1 THEN -1 WHEN 0 THEN [size]*8/1024.00 ELSE maxsize/1024.00*8 END,'
+ + 
+-- 20081125 end 
+' NextExtent_MB = CASE WHEN (1048576&[status])=1048576 THEN ([growth]/100.00)*([size]*8/1024.00) WHEN [growth]=0 THEN 0 ELSE [growth]*8/1024.00 END,'
+ + 
+' GrowthType = CASE WHEN (1048576&[status])=1048576 THEN ''%'' ELSE ''Pages'' END,'
+ + ' FileId = [fileid],' + ' GroupId = [groupid],' + 
+             ' PhysicalFileName= [filename],' + 
+             ' CurTimeStamp = GETDATE()' + 
+-- 20081125 begin @DBName embedded spaces 
+-- 'FROM '+@DBName+'..sysfiles'  
+'FROM [' + @DBName + ']..sysfiles' 
+
+    -- 20081125 end 
+    print @SQLString 
+
+    insert into #dbfileinfo 
+    exec (@SQLString) 
+
+    update #dbfileinfo 
+    -- 20081125 begin LogFileUsed is % 
+    -- SET SpaceUsed_MB = (SELECT LogFileUsed FROM #LogSizeStats WHERE DBName = @DBName)
+     set    SpaceUsed_MB = Size_MB / 100.0 * (select LogFileUsed 
+                                             from   #logsizestats 
+                                             where  DBName = @DBName) 
+    -- 20081125 end 
+    where  UsageType = 'Log' 
+           and DBName = @DBName 
+
+    -- 20081125 begin @DBName embedded spaces 
+    -- SELECT @SQLString = 'USE ' + @DBName + ' DBCC SHOWFILESTATS WITH NO_INFOMSGS'
+     select @SQLString = 'USE [' + @DBName + 
+                        '] DBCC SHOWFILESTATS WITH NO_INFOMSGS' 
+
+    -- 20081125 end 
+    insert #datafilestats 
+           (FileId, 
+            [FileGroup], 
+            TotalExtents, 
+            UsedExtents, 
+            [Name], 
+            [FileName]) 
+    execute(@SQLString) 
+
+    update #dbfileinfo 
+    set    [SpaceUsed_MB] = S.[UsedExtents] * 64 / 1024.00 
+    from   #dbfileinfo as F 
+           inner join #datafilestats as S 
+             on F.[FileId] = S.[FileId] 
+                and F.[GroupId] = S.[FileGroup] 
+                and F.[DBName] = @DBName 
+
+    truncate table #datafilestats 
+
+    select @MinId = @MinId + 1 
+end 
+
+    select @@servername                            as servidor, 
+           substring(A.PhysicalFileName, 1, 1)     as unidad, 
+           sum ([Size_MB])                         as SqlTotalDB, 
+           sum([SpaceUsed_MB])                     as SqlTotalUsedSpaceDB, 
+           sum (( [Size_MB] ) - ( [SpaceUsed_MB] ))as SQLTotalFreeSpaceDB 
+    into   #usados 
+    from   #dbfileinfo as A 
+           left join #fixeddrives as B 
+             on substring(A.PhysicalFileName, 1, 1) = B.DriveLetter 
+    --ORDER BY CAST([NextAllocation_MB] AS decimal(6,2))  
+    --ORDER BY [FreeSpaceInDrive]  
+    --where ([Size_MB] - [SpaceUsed_MB]) -  ([NextAllocation_MB]) < 0 
+    --where (B.MB_Free) + (([Size_MB] - [SpaceUsed_MB]) -  ([NextAllocation_MB])) < 2000
+     --where (B.MB_Free) + (([Size_MB] - [SpaceUsed_MB]) -  ([NextAllocation_MB])) <= 0
+     --where CONVERT(sysname,DatabasePropertyEx([DBName],'Recovery')) = 'FULL' 
+    --where [MaxSize_MB] <> 2097152.00 and [MaxSize_MB] <> -1.00 
+    --where left ([PhysicalFileName],1) = 'C' 
+    --where (CAST(([Size_MB] - [SpaceUsed_MB]) / [Size_MB] AS decimal(4,2))) > 0.5 and ([Size_MB]) > 5000 --mas de la mitad de espacio libre
+     --where ([Size_MB]) > 100000 --TAMA?O DE LA BASE DE DATOS 
+    --where [DBName] like '%content%' 
+    where[UsageType] = 'data' 
+    --where [NextAllocation_MB] < 5 and [SpaceUsed_MB] > 20 and [dbname] not in ('master','model','msdb','tempdb') -- bases de datos grandes con poco crecimiento
+     --where [NextAllocation_MB] > 500 -- bases de datos con crecimiento desmesurado
+     --where [Size_MB] - [SpaceUsed_MB] < 50 and [UsageType] = 'log' 
+    group  by substring(A.PhysicalFileName, 1, 1) 
+
+    
+    select 
+           sum(SQLTotalFreeSpaceDB)
+		   
+
+    from   #fixeddrives as f 
+           inner join #usados as z 
+             on z.unidad = f.DriveLetter 
+			 
+	--where MB_Free < 5000			 
+	
+
+    --select * from #usados 
+    --ORDER BY ([Size_MB] - [SpaceUsed_MB]) -  ([NextAllocation_MB]) 
+    --ORDER BY CAST([NextAllocation_MB] AS decimal(6,2))  
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#dbfileinfo')) 
+      begin 
+          drop table #dbfileinfo 
+      end 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#logsizestats')) 
+      begin 
+          drop table #logsizestats 
+      end 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#datafilestats')) 
+      begin 
+          drop table #datafilestats 
+      end 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#fixeddrives')) 
+      begin 
+          drop table #fixeddrives 
+      end 
+
+    if exists (select 1 
+               from   tempdb..sysobjects 
+               where  [Id] = object_id('tempdb..#usados')) 
+      begin 
+          drop table #usados 
+      end 
+
+    -- 20081125 begin SET NOCOUNT OFF 
+    set nocount off 
+-- 20081125 end 
+end
