@@ -1,0 +1,149 @@
+--Find all Job Relationships with SSIS Config files
+
+--https://www.sqlservercentral.com/scripts/find-all-job-relationships-with-ssis-config-files
+
+--If you've ever had the pleasure of editing a job that calls other jobs, that calls even more jobs you understand 
+--what a headache that can turn into.
+--This script walks through the SYSJOBS and SYSJOB STEPS tables and builds the parent/child job hierarchy. 
+--It then analyzes each job step, looking for any SSIS job steps and subsequent config files used, if any. 
+--(This part can be easily changed to look for anything)
+--This was borne out of a need to change a rather large job hierarchy after one of our ETL servers failed and 
+--everything needed to be redirected to a new box.
+===================================================
+/*
+Build Job Parent/Child Hierarchy using the Parent Job Name
+Author: Ray Sotkiewicz, March 2011
+Email: raysot @ comcast DOT Net
+Use freely. 
+*/
+--------------------------------------------------------------
+-- Find all DTSCONFIG Files associated with a Job Workflow
+--------------------------------------------------------------
+Declare @JobName SYSName
+Set @JobName = '_BackupWorkflow: Daily Userdb'
+------------------------------------------
+-- Create work Table
+------------------------------------------
+SET NOCOUNT ON
+IF OBJECT_ID('tempdb..#JobWork') IS NOT NULL 
+BEGIN
+ Drop Table #JobWork 
+    Create table #JobWork
+    (
+         Parent_Job_Name SYSNAME
+        ,Job_Name SYSNAME
+        ,Step_ID INT
+        ,Step_Name SYSNAME
+        ,Child_Job_Name SYSNAME
+        ,Processed BIT
+    )    
+END
+------------------------------------------
+-- Insert Top-Level (Parent) Job Name
+------------------------------------------
+--INSERT #JobWork( Job_Name, Step_ID, Step_Name, Child_Job_Name, Processed) VALUES (@JobNAme, 0, '', '', 1)
+------------------------------------------
+-- Get Child Jobs: (Children)
+------------------------------------------
+INSERT #JobWork
+Select     @JobName AS 'Parent_Job_Name'
+        ,sj.[name] AS 'Job_Name'
+        ,sjs.Step_ID
+        ,sjs.step_name 
+        ,substring(Command, (29), (Len(Command)-29 ) ) AS 'Child_Job_Name'
+        ,0 as 'Processed'        
+from msdb..sysjobs sj
+INNER JOIN msdb..sysjobsteps sjs on sj.job_id = sjs.job_ID 
+Where sj.name = @JobName
+AND sjs.command LIKE 'EXEC msdb.dbo.sp_start_job%'
+AND sjs.subsystem = 'TSQL' 
+
+---------------------------------
+-- Interim Validation
+---------------------------------
+--Select * from #JobWork
+---------------------------------
+-- Loop to find more child jobs
+---------------------------------
+StartLoop:
+
+DECLARE @_JobName SYSNAME
+
+DECLARE JOB_cursor CURSOR FOR 
+Select Child_Job_Name from #JobWork Where Len(Child_Job_Name) > 0 and Processed = 0 
+
+OPEN JOB_cursor 
+FETCH NEXT FROM JOB_cursor INTO @_JOBName 
+
+WHILE @@FETCH_STATUS = 0 
+BEGIN 
+
+ INSERT #JobWork
+        Select     @_JOBName AS 'Parent_Job_Name'
+         ,sj.[name] AS 'Job_Name'
+                ,sjs.Step_ID
+                ,sjs.step_name 
+                ,substring(Command, (29), (Len(Command)-29 ) ) AS 'Child_Job_Name'
+                ,0 as 'Processed'        
+        from msdb..sysjobs sj
+        INNER JOIN msdb..sysjobsteps sjs on sj.job_id = sjs.job_ID 
+        Where sj.name = @_JobName
+        AND sjs.command LIKE 'EXEC msdb.dbo.sp_start_job%'
+        AND sjs.subsystem = 'TSQL' 
+        Update #JobWork Set Processed = 1 where Child_Job_Name = @_JobName 
+ FETCH NEXT FROM JOB_cursor INTO @_JobName 
+END 
+
+CLOSE JOB_cursor 
+DEALLOCATE JOB_cursor
+----------------------------------------
+-- Trap for any new Child Jobs
+----------------------------------------
+If (Select COUNT(*) from #JobWork where Processed = 0) > 0
+BEGIN
+    Goto StartLoop
+END
+---------------------------------
+-- Interim Validation
+---------------------------------
+Select Parent_Job_Name, Child_Job_Name from #JobWork
+------------------------------------------------------
+-- Return Parent Job SSIS Config Files
+-------------------------------------------------------
+    Select    -- sj.job_id
+             Left(sj.[name], 50) AS 'Job_Name'
+            ,sjs.Step_ID
+            ,Left(sjs.step_name, 50) AS 'Step_Name' 
+            ,Left(substring(sjs.Command, (CHARINDEX('/CONFIGFILE', sjs.Command) + 13), (CHARINDEX('dtsConfig"', sjs.Command) + 9) -(CHARINDEX('/CONFIGFILE', sjs.Command) + 13) ), 256) AS 'Config_File'
+            ,sjs.Command
+    from msdb..sysjobs sj
+    INNER JOIN msdb..sysjobsteps sjs ON sj.job_id = sjs.job_id
+    Where sj.name = @JobName
+    AND sjs.command LIKE '%/CONFIGFILE%'
+    AND sjs.subsystem = 'SSIS' 
+-------------------------------------------------------
+-- Get All SSIS Job Steps with Config Files 
+-------------------------------------------------------
+DECLARE @_StepName SYSNAME
+DECLARE Step_cursor CURSOR FOR 
+Select Child_Job_Name from #JobWork Where Len(Child_Job_Name) > 0 
+
+OPEN Step_cursor 
+FETCH NEXT FROM Step_cursor INTO @_StepName 
+WHILE @@FETCH_STATUS = 0 
+BEGIN 
+    Select    -- sj.job_id
+             Left(sj.[name], 50) AS 'Job_Name'
+            ,sjs.Step_ID
+            ,Left(sjs.step_name, 50) AS 'Step_Name' 
+            ,Left(substring(sjs.Command, (CHARINDEX('/CONFIGFILE', sjs.Command) + 13), (CHARINDEX('dtsConfig"', sjs.Command) + 9) -(CHARINDEX('/CONFIGFILE', sjs.Command) + 13) ), 256) AS 'Config_File'
+            ,sjs.Command
+    from msdb..sysjobs sj
+    INNER JOIN msdb..sysjobsteps sjs ON sj.job_id = sjs.job_id
+    Where sj.name = @_StepName
+    AND sjs.command LIKE '%/CONFIGFILE%'
+    AND sjs.subsystem = 'SSIS'      
+ FETCH NEXT FROM Step_cursor INTO @_StepName 
+END 
+CLOSE STEP_cursor 
+DEALLOCATE STEP_cursor
