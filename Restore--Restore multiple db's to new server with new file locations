@@ -1,0 +1,103 @@
+--Restore multiple db's to new server with new file locations
+===========================================================
+--https://www.sqlservercentral.com/scripts/restore-multiple-dbs-to-new-server-with-new-file-locations
+===========================================================
+--We're upgrading our SQL Server soon and the new server does not have the same disk layout as the old one. 
+--There's over 80 db's to move, so figured a script that would get the last backup file taken of the db and grab the 
+--logical file names from the sysfiles table on each of the db's would make the task easier and print the full restore statement 
+--for each db would be quicker than individual restores. It's not perfect, but it did the trick for me.
+===========================================================
+ -- Script to produce T-SQL that will restore multiple db's from latest backup set ...
+SET NOCOUNT ON
+GO
+
+
+DECLARE @datafile VARCHAR(500)
+DECLARE @logfile VARCHAR(500)
+DECLARE @dbs TABLE
+    (
+      Id INT IDENTITY(1, 1) ,
+      DBName VARCHAR(255)
+    )
+INSERT  INTO @dbs
+        ( DBName )
+        SELECT  name
+        FROM    sys.databases
+
+DECLARE @DBCount INT ,
+    @Loop INT = 1 ,
+    @CurrentDB VARCHAR(255) ,
+    @DeviceName VARCHAR(500)
+SELECT  @DBCount = COUNT(*)
+FROM    @dbs
+WHILE @Loop <= @DBCount 
+    BEGIN
+	
+        SELECT  @CurrentDB = DBName
+        FROM    @dbs
+        WHERE   Id = @Loop
+
+	
+        SELECT  @DeviceName = MaxDeviceName
+        FROM    ( SELECT    database_name ,
+                            MAX(physical_device_name) AS MaxDeviceName ,
+                            MAX(backup_start_date) AS MaxBackupDate
+                  FROM      msdb.dbo.backupmediafamily A
+                            JOIN msdb.dbo.backupset B ON A.media_set_id = B.media_set_id
+                  GROUP BY  database_name ,
+                            physical_device_name
+                ) A
+                JOIN ( SELECT   database_name ,
+                                MAX(backup_start_date) AS MaxBackupDate
+                       FROM     msdb.dbo.backupmediafamily A
+                                JOIN msdb.dbo.backupset B ON A.media_set_id = B.media_set_id
+                       GROUP BY database_name
+                     ) B ON A.database_name = B.database_name
+                            AND A.MaxBackupDate = B.MaxBackupDate
+                JOIN sys.databases C ON A.database_name = C.name
+                                        AND C.name = @CurrentDB
+        PRINT CHAR(13) + 'RESTORE DATABASE [' + @CurrentDB + '] FROM DISK = ''' + @DeviceName + ''' WITH STATS '
+       
+        DECLARE @logicalfilename NVARCHAR(255) ,
+            @filename NVARCHAR(255) ,
+            @Count1 INT = 0 ,
+            @Count2 INT = 0 ,
+            @Count3 INT = 0 ,
+            @NewLocation NVARCHAR(500) = 'C:\Program Files\Microsoft SQL Server\MSSQL11.MSSQLSERVER\MSSQL\DATA\'
+        DECLARE @Str NVARCHAR(MAX)
+-- MDF's        
+
+        SELECT  @Str = 'SELECT @outcnt = Count(*), @outlogicalfilename = name, @outfilename = RIGHT(''\''+filename, CHARINDEX(''\'', REVERSE(''\''+filename))-1) FROM ['
+                + @CurrentDB + '].dbo.sysfiles Where filename like ''%.mdf'' GROUP BY name, filename'
+        EXEC sp_executesql @Str, N'@outlogicalfilename nvarchar(255) OUTPUT, @outfilename nvarchar(255) OUTPUT, @outcnt int OUTPUT',
+            @outlogicalfilename = @logicalfilename OUTPUT, @outfilename = @filename OUTPUT, @outcnt = @Count1 OUTPUT
+        DECLARE @MoveMDFs NVARCHAR(500)
+        SET @MoveMDFs = ', MOVE ''' + @logicalfilename + ''' TO ''' + @NewLocation + @filename + ''''
+        IF @Count1 > 0 
+            BEGIN				
+                PRINT @MoveMDFs
+            END
+--NDF's
+        SELECT  @Str = 'SELECT @outcnt = Count(*),  @outlogicalfilename = name, @outfilename = RIGHT(''\''+filename, CHARINDEX(''\'', REVERSE(''\''+filename))-1) FROM ['
+                + @CurrentDB + '].dbo.sysfiles Where filename like ''%.ndf'' GROUP BY name, filename'
+        EXEC sp_executesql @Str, N'@outlogicalfilename nvarchar(255) OUTPUT, @outfilename nvarchar(255) OUTPUT, @outcnt int OUTPUT',
+            @outlogicalfilename = @logicalfilename OUTPUT, @outfilename = @filename OUTPUT, @outcnt = @Count2 OUTPUT
+        DECLARE @MoveNDFs NVARCHAR(500)
+        SET @MoveNDFs = ', MOVE ''' + @logicalfilename + ''' TO ''' + @NewLocation + @filename + ''''
+        IF @Count2 > 0 
+            BEGIN
+                PRINT @MoveNDFs
+            END
+--LDF's
+        SELECT  @Str = 'SELECT @outcnt = Count(*),  @outlogicalfilename = name, @outfilename = RIGHT(''\''+filename, CHARINDEX(''\'', REVERSE(''\''+filename))-1) FROM ['
+                + @CurrentDB + '].dbo.sysfiles Where filename like ''%.ldf'' GROUP BY name, filename'
+        EXEC sp_executesql @Str, N'@outlogicalfilename nvarchar(255) OUTPUT, @outfilename nvarchar(255) OUTPUT, @outcnt int OUTPUT',
+            @outlogicalfilename = @logicalfilename OUTPUT, @outfilename = @filename OUTPUT, @outcnt = @Count3 OUTPUT
+        DECLARE @MoveLDFs NVARCHAR(500)
+        SET @MoveLDFs = ', MOVE ''' + @logicalfilename + ''' TO ''' + @NewLocation + @filename + ''''
+        IF @Count3 > 0 
+            BEGIN				
+                PRINT @MoveLDFs
+            END    
+        SET @Loop = @Loop + 1
+    END
