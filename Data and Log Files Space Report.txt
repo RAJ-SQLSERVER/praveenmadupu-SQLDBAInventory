@@ -1,0 +1,23 @@
+Use master
+go
+Create Table #dbInfo (dId smallint, dbName sysname, gId smallint NULL, segName varchar(256) NULL, 
+       filName varchar(520) NULL, sizeMB decimal(10,2) null, 
+       usedMB decimal(10,2) null, freeMB decimal(10,2) null, 
+       pcntUsed decimal(10,2) null, pcntFree decimal(10,2) null)
+Declare @sSql varchar(1000)
+Set @sSql = 'Use [?];
+Insert #dbInfo (dId, dbName, gid, segName, filName, sizeMB, usedMB)
+Select db_id(), db_name(), groupid, rtrim(name), filename, Cast(size/128.0 As Decimal(10,2)), 
+Cast(Fileproperty(name, ''SpaceUsed'')/128.0 As Decimal(10,2))
+From dbo.sysfiles Order By groupId Desc;'
+Exec sp_MSforeachdb @sSql
+Update #dbInfo Set
+freeMB = sizeMB - usedMB,
+pcntUsed = (usedMB/sizeMB)*100,
+pcntFree = ((sizeMB-usedMB)/sizeMB)*100
+
+select * from #dbInfo 
+where dbname not in ('master','msdb','model','tempdb')
+--where dbname in ('')
+--and filname like '%E:\%' order by freemb desc
+drop table #dbInfo

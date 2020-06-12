@@ -1,0 +1,39 @@
+-- TSQL Script to fetch ENTERPRISE FEATURES of all DB's report. 
+-- https://gallery.technet.microsoft.com/scriptcenter/TSQL-QUERY-TO-FIND-f527d118/description
+
+Use master
+go
+set nocount on 
+Declare @name varchar(255) 
+declare @sql varchar(max) 
+create table #Features( 
+ServerName varchar(29), 
+DatabaseName varchar(100), 
+feature_name varchar(100), 
+feature_id int) 
+DECLARE db_cursor CURSOR  FOR  
+SELECT name  FROM sys.databases  
+OPEN db_cursor    
+  
+DECLARE DatabaseBackup_cursor CURSOR FOR 
+select name from sys.databases where state=0 
+OPEN DatabaseBackup_cursor 
+FETCH NEXT FROM DatabaseBackup_cursor into @name 
+WHILE @@FETCH_STATUS = 0 
+BEGIN 
+  
+set @sql = 'SELECT @@servername,''['+@name+']'' as DatabaseName,*  
+    FROM ['+@name+'].sys.dm_db_persisted_sku_features 
+    ORDER BY feature_name;' 
+      
+insert into #Features 
+exec (@sql) 
+FETCH NEXT FROM DatabaseBackup_cursor into @name 
+END 
+CLOSE DatabaseBackup_cursor 
+DEALLOCATE DatabaseBackup_cursor 
+CLOSE db_cursor    
+DEALLOCATE db_cursor 
+select * from #Features 
+drop table #Features
+

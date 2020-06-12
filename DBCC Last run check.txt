@@ -1,0 +1,61 @@
+CREATE TABLE #DBInfoResults 
+(
+[ParentObject] VARCHAR(512),
+[Object] VARCHAR(512),
+[Field] VARCHAR(512),
+[VALUE] VARCHAR(512)
+)
+
+CREATE TABLE #FindDBCCLastKnownGoodDate
+(
+[DatabaseName] SYSNAME,
+[LastKnowGoodDBCCCheckDate] NVARCHAR(512), 
+)
+
+DECLARE
+@DatabaseName SYSNAME,
+@ExecTSQL VARCHAR(512);
+
+DECLARE cDBInfoResults CURSOR FOR 
+
+SELECT NAME
+FROM sys.databases
+WHERE STATE_DESC = 'ONLINE'
+
+OPEN cDBInfoResults;
+
+FETCH NEXT FROM cDBInfoResults INTO @DatabaseName;
+
+WHILE @@Fetch_Status = 0 
+
+BEGIN
+
+SET @ExecTSQL = 'Use [' + @DatabaseName +'];' + CHAR(10)+ CHAR(13) +
+'DBCC DBInfo() WITH TABLERESULTS, NO_INFOMSGS;' + CHAR(10)+ CHAR(13)
+
+INSERT INTO #DBInfoResults
+EXECUTE (@ExecTSQL);
+
+INSERT INTO #FindDBCCLastKnownGoodDate
+(DatabaseName, [LastKnowGoodDBCCCheckDate])
+
+SELECT @DatabaseName, VALUE 
+FROM #DBInfoResults where Field = 'dbi_dbccLastKnownGood' 
+
+TRUNCATE TABLE #DBInfoResults;
+
+FETCH NEXT FROM cDBInfoResults INTO @DatabaseName;
+
+END
+
+CLOSE cDBInfoResults;
+DEALLOCATE cDBInfoResults;
+
+SELECT 
+ DISTINCT([DatabaseName]) AS [Database Name]
+,[LastKnowGoodDBCCCheckDate] AS [Last Know Good DBCC Check Date] 
+FROM #FindDBCCLastKnownGoodDate
+ORDER BY [LastKnowGoodDBCCCheckDate] DESC
+
+DROP TABLE #DBInfoResults
+DROP TABLE #FindDBCCLastKnownGoodDate

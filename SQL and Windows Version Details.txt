@@ -1,0 +1,45 @@
+--TSQL Script to get windows version details. 
+
+use master
+go
+select @@version
+
+
+--TSQL Script to get SQL Server Instance, Edition, Version, SP, Cluster, Alwayson Details.
+
+/*SCRIPT START*/
+DECLARE @cpu int, @memory decimal(2), @dbcount int, @dbs varchar(2000)
+SELECT @cpu=cpu_count FROM sys.dm_os_sys_info
+SELECT @memory= CONVERT(decimal(2),ROUND([total_physical_memory_kb]/1024.0/1024.0,1)) FROM [sys].[dm_os_sys_memory]
+SELECT @dbcount=COUNT(*) FROM sys.databases where database_id>4
+--SELECT @dbs = (SELECT STUFF(
+--    (
+--    SELECT ', ' + DB.name
+--    FROM sys.databases AS DB
+--    WHERE DB.database_id>4
+--    FOR XML PATH('')), 1, 2, '') AS Databases)
+SELECT 
+SERVERPROPERTY('ComputerNamePhysicalNetBIOS') as [MachineName],
+@@SERVERNAME as [SQLServerName]
+,SERVERPROPERTY('Edition') as [Edition]
+,[Version] = 
+    CASE WHEN CONVERT(varchar(50), SERVERPROPERTY('ProductVersion')) LIKE '9%' THEN 'SQL 2005'
+        WHEN CONVERT(varchar(50), SERVERPROPERTY('ProductVersion')) LIKE '10.0%' THEN 'SQL 2008'
+        WHEN CONVERT(varchar(50), SERVERPROPERTY('ProductVersion')) LIKE '10.5%' THEN 'SQL 2008R2'
+        WHEN CONVERT(varchar(50), SERVERPROPERTY('ProductVersion')) LIKE '11%' THEN 'SQL 2012'
+        WHEN CONVERT(varchar(50), SERVERPROPERTY('ProductVersion')) LIKE '12%' THEN 'SQL 2014'
+        WHEN CONVERT(varchar(50), SERVERPROPERTY('ProductVersion')) LIKE '14%' THEN 'SQL 2016'
+        WHEN CONVERT(varchar(50), SERVERPROPERTY('ProductVersion')) LIKE '15%' THEN 'SQL vNext'
+    ELSE 'UNKNOWN' END
+,SERVERPROPERTY('ProductLevel') as [ServicePackLevel]
+,[CPU] = @cpu
+,[Memory (GB)] = @memory
+,[Num.Databases] = @dbcount
+
+--,ISNULL(SERVERPROPERTY('ProductUpdateLevel'),'N/A') as [UpdateLevel]
+--,ISNULL(SERVERPROPERTY('ProductUpdateReference'),'N/A') as [UpdateKBNumber]
+,SERVERPROPERTY('IsClustered') as [Clustered]
+,SERVERPROPERTY('IsHadrEnabled') as [isAlwaysON]
+--,[UserDatabasesHosted] = @dbs
+GO
+/*SCRIPT END*/

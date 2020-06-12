@@ -1,0 +1,173 @@
+SET NOCOUNT ON
+SET ANSI_WARNINGS OFF
+
+DECLARE @ver NVARCHAR(128)
+DECLARE @majorVersion NVARCHAR(4)
+SET @ver = CAST(SERVERPROPERTY('productversion') AS NVARCHAR)
+SET @ver = SUBSTRING(@ver,1,CHARINDEX('.',@ver)+1)
+SET @majorVersion  = CAST(@ver AS nvarchar)
+
+;WITH ALLDATA AS (
+
+-----------General Server Info--------------------
+
+SELECT SERVERPROPERTY('ServerName') AS [ServerName],SERVERPROPERTY('InstanceName') AS [Instance],
+SERVERPROPERTY('ComputerNamePhysicalNetBIOS') AS [ComputerNamePhysicalNetBIOS],
+SERVERPROPERTY('ProductVersion') AS [ProductVersion],
+    CASE @MajorVersion
+WHEN '8.0' THEN 'SQL Server 2000'
+WHEN '9.0' THEN 'SQL Server 2005'
+WHEN '10.0' THEN 'SQL Server 2008'
+WHEN '10.5' THEN 'SQL Server 2008 R2'
+WHEN '11.0' THEN 'SQL Server 2012'
+WHEN '12.0' THEN 'SQL Server 2014'
+WHEN '13.0' THEN 'SQL Server 2016'
+WHEN '14.0' THEN 'SQL Server 2017'
+END AS 'SQL',
+SERVERPROPERTY('ProductLevel') AS [ProductLevel],
+SERVERPROPERTY('Edition') AS [Edition],
+SERVERPROPERTY ('BuildClrVersion') AS NET,
+    CASE SERVERPROPERTY('IsClustered')
+        WHEN 0 THEN 'NO'
+        WHEN 1 THEN 'YES'
+    END
+    AS [IsClustered],
+CASE WHEN CHARINDEX('Hypervisor', @@VERSION)>0
+    OR CHARINDEX('VM',@@VERSION)>0 THEN 'VM'
+    ELSE 'PHYSICAL'
+    END
+    AS [VM_PHYSICAL],
+     CASE SERVERPROPERTY('IsIntegratedSecurityOnly')
+     WHEN 1 THEN 'WINDOWS AUTHENTICATION ONLY'
+     WHEN 0 THEN 'SQL & WINDOWS AUTHENTICATION'
+  END AS 'SECURITY MODE'
+
+  -------------Replication------------------------
+
+  ,'Repl-Pub'  = (SELECT COUNT(*) FROM sys.databases WHERE ( NOT [state] = 6 And is_published = 1  ))
+  ,'Repl-Dist' = (SELECT COUNT(*) FROM sys.databases WHERE ( NOT [state] = 6 And is_distributor = 1  ))
+  --,'Repl-Sub'  = (SELECT COUNT(*)  FROM sys.databases WHERE (NOT [state] = 6 AND  OBJECT_ID(name+'.dbo.MSreplication_objects')  IS NOT NULL)
+  ,'Repl-Sub'  = (SELECT COUNT(*)  FROM sys.databases WHERE  case when state = 0 AND OBJECT_ID(name+'.dbo.MSreplication_objects')  IS NOT NULL then 1  end = 1)
+  --and case when state = 0 then 
+  --          case when OBJECT_ID (name+'.dbo.some_table','U') is not null then 1 end
+  --      end = 1     )
+
+ -------------------SQL Server Agent Jobs-----------------------------
+
+ ,AgentJobs = (select Count(*)
+ from  msdb..sysjobs s )
+
+ 
+--,JobsWithSSIS = (SELECT * FROM SSIS)
+,JobsWithSSIS = (SELECT COUNT (DISTINCT Jobs.name)--jobs.name,jobs.[description],steps.*  
+FROM [msdb].[dbo].[sysjobs]  jobs
+JOIN [msdb].[dbo].[sysjobsteps]  steps ON jobs.job_id = steps.job_id
+WHERE steps.subsystem = 'SSIS')
+
+ -------------------Linked Servers------------------------------------
+
+ ,LinkedServers = ( SELECT COUNT(ss.server_id)
+		
+	  FROM sys.Servers ss
+ LEFT JOIN sys.linked_logins sl
+	    ON ss.server_id = sl.server_id
+ LEFT JOIN sys.server_principals ssp
+        ON ssp.principal_id = sl.local_principal_id WHERE ss.server_id <> 0 )
+ --SELECT ss.server_id
+	--	  ,ss.name
+	--	  ,'Server ' = Case ss.Server_id
+	--					    when 0 then 'Current Server'
+	--					    else 'Remote Server'
+	--					    end
+	--	  ,ss.product
+	--	  ,ss.provider
+	--	  ,ss.catalog
+	--	  ,'Local Login ' = case sl.uses_self_credential
+	--					    when 1 then 'Uses Self Credentials'
+	--					    else ssp.name
+	--					    end
+	--	   ,'Remote Login Name' = sl.remote_name
+	--	   ,'RPC Out Enabled'    = case ss.is_rpc_out_enabled
+	--							   when 1 then 'True'
+	--							   else 'False'
+	--							   end
+	--	   ,'Data Access Enabled' = case ss.is_data_access_enabled
+	--							    when 1 then 'True'
+	--							    else 'False'
+	--							    end
+	--	   ,ss.modify_date,ss.is_linked
+	--  FROM sys.Servers ss
+ --LEFT JOIN sys.linked_logins sl
+	--    ON ss.server_id = sl.server_id
+ --LEFT JOIN sys.server_principals ssp
+ --       ON ssp.principal_id = sl.local_principal_id WHERE ss.server_id <> 0
+
+ -------------------DBMail--------------------------------------
+ ,DBMail = (select COUNT(*)
+from msdb.dbo.sysmail_profile p 
+join msdb.dbo.sysmail_profileaccount pa on p.profile_id = pa.profile_id 
+join msdb.dbo.sysmail_account a on pa.account_id = a.account_id 
+join msdb.dbo.sysmail_server s on a.account_id = s.account_id)
+
+-----------------------------Service Broker-----------------------------
+
+,ServiceBrokerObjects = (SELECT COUNT (*)
+
+--ServiceContract.name AS 'ContractName',
+
+--ServiQueue.name AS 'QueueName',
+
+--Servi.name AS 'ServiceName',
+
+--MessageType.name AS 'MessageType',
+
+--MessageUsage.is_sent_by_initiator,
+
+--MessageUsage.is_sent_by_target,
+
+--MessageType.validation,
+
+--MessageType.validation_desc
+
+FROM sys.service_contract_message_usages AS MessageUsage
+
+INNER JOIN sys.service_message_types AS MessageType ON MessageUsage.message_type_id =MessageType.message_type_id
+
+INNER JOIN sys.service_contracts AS ServiceContract ON ServiceContract.service_contract_id =MessageUsage.service_contract_id
+
+INNER JOIN sys.service_contract_usages ServContractUse ON ServContractUse.service_contract_id =ServiceContract.service_contract_id
+
+INNER JOIN sys.services AS Servi ON Servi.service_id=ServContractUse.service_id
+
+INNER JOIN sys.service_queue_usages AS SerQueueUse ON SerQueueUse.service_id = Servi.service_id
+
+INNER JOIN sys.service_queues AS ServiQueue ON ServiQueue.object_id=SerQueueUse.service_queue_id)
+
+  ---------------------ENDPOINTS----------------------------------
+
+  ,NumOfEndpoints = (Select COUNT(*) from sys.endpoints)
+  ,SQLLogins = (SELECT COUNT(*) FROM sys.server_principals WHERE TYPE IN ('S') and name not like '%##%')
+,WinLogins = (SELECT COUNT(*) FROM sys.server_principals WHERE TYPE IN ('U') and name not like '%##%')
+,WinGroupLogins = (SELECT COUNT(*) FROM sys.server_principals WHERE TYPE IN ('G') and name not like '%##%')
+  )
+
+  -----------------------LOGINS----------------------------------
+
+  , ALLFiles AS
+(
+SELECT name, s.database_id,physical_name AS current_file_location,SUBSTRING(physical_name, 1,2) AS DriveLocation FROM sys.master_files s
+)
+--SELECT * FROM ALLFILES
+,SysDbs AS (
+SELECT DISTINCT DriveLocation FROM ALLFiles a WHERE a.database_id < 5 AND NOT [name] LIKE 'temp%'
+)--SELECT * FROM SysDbs
+,UserDbs AS (
+SELECT DISTINCT DriveLocation FROM ALLFiles WHERE database_id > 4
+)--SELECT * FROM UserDbs
+, Final AS (SELECT SysDbs.DriveLocation SysDrives,UserDbs.DriveLocation UsrDrives FROM SysDbs CROSS APPLY UserDbs)
+, SameDrive AS (SELECT  Final.SysDrives, Final.UsrDrives, CASE WHEN Final.SysDrives = Final.UsrDrives THEN 1 ELSE 0 END AS SameDrive FROM Final	)
+
+  
+
+
+  SELECT *, ISNULL((SELECT DISTINCT s.SameDrive FROM SameDrive s WHERE S.SameDrive = 1), 0) AS SameDr FROM ALLDATA A
