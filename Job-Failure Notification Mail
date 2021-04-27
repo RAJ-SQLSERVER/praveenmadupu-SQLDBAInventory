@@ -1,9 +1,12 @@
 SQL Server Agent Job Failure Monitoring
+
 --An improved alternative to the native SQL Server Agent job failure alerts.
+
 SQL Server Agent has a built-in alerting process for when jobs fail, but the information it provides isn’t very useful – you’re only told which job, what time, who ran it and which step failed. If you want to see why it failed, you have to review the job history manually. On a busy system with a lot of frequently run jobs, the job history could have cleared down by the time you go and look at it – especially if you’ve left the job history thresholds at the SQL Server defaults - something we routinely pick up in our Database Reviews.
 
 As a best practice, we recommend increasing the Maximum job history log size and the Maximum job history rows per job to 100000 and 1000 respectively, to give you a better chance of getting useful job history from the Agent:
-Screen shot from SQL Server Management Studio of SQL Server Agent Properties History window
+Screen shot from SQL Server Management Studio of SQL Server Agent Properties History window.
+
 Additionally, for a job with multiple steps, where some steps are set to “go to next step” when they fail, you’ll never get an alert that they’ve failed.
 
 To remove manual investigation, overcome these shortfalls and ensure that a useful alert is generated for any job step failures, create a SQL Server Agent job that executes the SQL query included below.
