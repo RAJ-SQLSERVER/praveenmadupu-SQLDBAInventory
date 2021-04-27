@@ -1,0 +1,114 @@
+SQL Server Agent Job Failure Monitoring
+--An improved alternative to the native SQL Server Agent job failure alerts.
+SQL Server Agent has a built-in alerting process for when jobs fail, but the information it provides isn’t very useful – you’re only told which job, what time, who ran it and which step failed. If you want to see why it failed, you have to review the job history manually. On a busy system with a lot of frequently run jobs, the job history could have cleared down by the time you go and look at it – especially if you’ve left the job history thresholds at the SQL Server defaults - something we routinely pick up in our Database Reviews.
+
+As a best practice, we recommend increasing the Maximum job history log size and the Maximum job history rows per job to 100000 and 1000 respectively, to give you a better chance of getting useful job history from the Agent:
+Screen shot from SQL Server Management Studio of SQL Server Agent Properties History window
+Additionally, for a job with multiple steps, where some steps are set to “go to next step” when they fail, you’ll never get an alert that they’ve failed.
+
+To remove manual investigation, overcome these shortfalls and ensure that a useful alert is generated for any job step failures, create a SQL Server Agent job that executes the SQL query included below.
+
+The SQL query provided uses a token to identify the job it is currently running in, and then uses that to work out when the job last ran, and get you all the job failures since then. This means you can schedule the job to run as frequently as you like, and it will always get you the failures since the last time it ran.
+
+The SQL query sends the details in an email using SQL Server Database Mail. You’ll need to have this enabled, and have a default mail profile configured (or update the SQL query to specify your mail profile). It’ll send one email per job, with all instances of that job failing contained in the email. This means you’ll have everything in one place for multiple failures of a job, and each individual job can be sent to different people or teams to look into, if required.
+
+The failure emails are formatted as below:
+
+xTEN Leeds SQL Server Failure Email results table
+SQL:
+
+======================================================================================
+--Get the job ID for the job this is running in.
+-- Note, will only run inside the job, not in an SSMS query
+DECLARE @JobID UNIQUEIDENTIFIER;
+SET @JobID = (SELECT CONVERT(uniqueidentifier, $(ESCAPE_NONE(JOBID))));
+
+--Get the last time this job ran
+DECLARE @LastRunTime DATETIME;
+
+SET @LastRunTime = (SELECT MAX([msdb].[dbo].agent_datetime(jh.[run_date], jh.[run_time]))
+	FROM [msdb].[dbo].[sysjobhistory] jh
+	WHERE jh.[job_id] = @JobID);
+
+--Get all the failed jobs into a temp table, and give each individual job an ID
+SELECT 
+	RANK() OVER(ORDER BY j.[name] ASC) AS FailedJobsID,
+	j.[name] AS JobName,
+    	jh.[step_name] AS StepName,
+    	[msdb].[dbo].agent_datetime(jh.[run_date], jh.[run_time]) AS RunDateTime,
+    	SUBSTRING(jh2.[message], PATINDEX('%The Job was invoked by User%', jh2.[message]) + 28, PATINDEX('%The last step to run was%', jh2.[message]) -PATINDEX('%The Job was invoked by User%', jh2.[message])-28) AS ExecutedBy,
+    	REPLACE(SUBSTRING(jh.[message], 1, PATINDEX('%. %', jh.[message])) , 'Executed as user: ','') AS ExecutionContext,
+    	REPLACE(SUBSTRING(jh.[message], PATINDEX('%. %', jh.[message]) + 2, LEN(jh.[message]) - PATINDEX('%. %', jh.[message])-1), '  The step failed.','') AS FailureMessage, 
+    	0 AS Emailed
+INTO #FailedJobs
+FROM [msdb].[dbo].[sysjobs] j
+INNER JOIN [msdb].[dbo].[sysjobhistory] jh ON jh.[job_id] = j.[job_id]
+INNER JOIN [msdb].[dbo].[sysjobsteps] js ON js.[job_id] = j.[job_id] AND js.[step_id] = jh.[step_id]
+INNER JOIN [msdb].[dbo].[sysjobhistory] jh2 ON jh2.[job_id] = jh.[job_id]
+--Job isn't currently running
+WHERE jh.[run_status] = 0
+--Only get jobs that ran since we last checked for failed jobs
+AND [msdb].[dbo].agent_datetime(jh.[run_date], jh.[run_time]) > DATEADD(SECOND,-1,@LastRunTime)
+--Join back to sysjobhistory again to get step_id 0 for the failed job, to find who executed it
+AND jh.[sql_severity] > 0
+AND jh2.[step_id] = 0
+AND [msdb].[dbo].agent_datetime(jh2.[run_date], jh2.[run_time]) <= [msdb].[dbo].agent_datetime(jh.[run_date], jh.[run_time])
+AND NOT EXISTS (SELECT 1 FROM [msdb].[dbo].[sysjobhistory] jh3
+	WHERE [msdb].[dbo].agent_datetime(jh3.[run_date], jh3.[run_time]) > [msdb].[dbo].agent_datetime(jh2.[run_date], jh2.[run_time])
+	AND jh3.[job_id] = jh2.job_id)
+--Add any exclusions here, for example:
+--Any SSIS steps, as the job history doesn't show SSIS catalogue error messages.
+--Checks for running SQL on either node of an Always On Availability Group
+AND js.[subsystem] <> 'SSIS'
+AND jh.[message] NOT LIKE ('%Unable to execute job on secondary node%')
+AND jh.[message] NOT LIKE ('%Request to run job%refused because the job is already running from a request by User%');
+
+--Variable to store the current job being dealt with
+DECLARE @CurrentFailedJobID INT;
+
+--Loop through all the failed jobs
+WHILE EXISTS (SELECT 1 FROM #FailedJobs)
+BEGIN
+	SET @CurrentFailedJobID = (SELECT TOP 1 fj.[FailedJobsID] FROM #FailedJobs fj);
+    
+	--Set the email subject
+    	DECLARE @MailSubject VARCHAR(255);
+    	SET @MailSubject = (SELECT @@SERVERNAME + ': ' + fj.[JobName] + ' steps have failed'
+		FROM #FailedJobs fj
+		WHERE fj.[FailedJobsID] = @CurrentFailedJobID
+		GROUP BY fj.[JobName]);
+
+	--Set the output as an HTML table to make it clear to read
+	DECLARE @tableHTML  NVARCHAR(MAX) ;
+	
+    	SET @tableHTML =
+        	N'<table border="1">' +  
+        	N'<tr>'+
+        	N'<th>Job Name</th><th>Job Step</th><th>Run Time</th><th>Run By</th><th>Execution Context</th><th>Error Message</th>' +
+        	N'</tr>' + 
+        	CAST ( ( 
+            		SELECT td = fj.[JobName], '',  
+                   		td = fj.[StepName], '',  
+                   		td = fj.[RunDateTime], '',
+                   		td = fj.[ExecutedBy], '',
+                   		td = fj.[ExecutionContext], '',
+                   		td = fj.[FailureMessage], ''
+            		FROM #FailedJobs fj
+	    		--Groups all the jobs with the same job name together into one email
+            		WHERE fj.[FailedJobsID] = @CurrentFailedJobID
+            		ORDER BY fj.[RunDateTime] DESC
+                  	FOR XML PATH('tr'), TYPE   
+        	) AS NVARCHAR(MAX) ) +  
+        	N'</table>' ;  
+    
+	EXEC msdb.dbo.sp_send_dbmail
+		@recipients = 'support@mycompany.net',
+                @subject = @MailSubject,
+                @body = @tableHTML,
+                @body_format = 'HTML' ; 
+	
+	--Delete the currently emailed job from the failed jobs list
+    	DELETE fj
+    	FROM #FailedJobs fj
+    	WHERE fj.[FailedJobsID] = @CurrentFailedJobID;
+END
