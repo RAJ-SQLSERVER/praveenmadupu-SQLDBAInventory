@@ -1,0 +1,52 @@
+Powershell script to check multiple server status
+
+Source: https://www.itadminstrator.com/2016/11/how-to-check-server-status-windows.html
+
+Run below PS Script on respective Diag Server by passing serverlist in a text file or notepad.
+
+#
+# Declare Variables
+#
+$OutputFileName="E:\Server_Status.csv"
+$ServersList="E:\ServerList.txt"
+#
+# Write Column Heading delimited by Tab
+#
+echo "Host Name`tNode Status" > $OutputFileName
+#
+# Read hostname(s) from file and assign to variable
+#
+$ServerNames = Get-Content $ServersList
+#
+# Loop Each Server and do ping test once
+#
+foreach ($ServerName in $ServerNames) {
+    $StartCount = 0
+    $TotalCount = (Get-Content $ServersList | Measure-Object | Select-Object -ExpandProperty Count)
+    # 
+    # Test Node reachability 
+    #  
+    if ( Test-Connection -ComputerName $ServerName -Count 1 -ErrorAction SilentlyContinue ) {
+    #  
+    # Write Node Up, delimited by tab
+    #  
+        echo "$ServerName`tUp" >> $OutputFileName
+    }
+    else {
+    #  
+    # Write Node Down, delimited by tab
+    #  
+        echo "$ServerName`tDown" >> $OutputFileName
+    }
+
+    $StartCount++
+    #
+    # Progress Bar
+    #
+    Write-Progress -Activity "Collate Host Status" -Status "Pinging Hosts..." -PercentComplete ($StartCount / $TotalCount *100) 
+}
+#
+# Launch Ping Status Output File
+#
+Invoke-Item $OutputFileName
+
