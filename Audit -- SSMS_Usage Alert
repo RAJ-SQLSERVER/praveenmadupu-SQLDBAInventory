@@ -1,0 +1,138 @@
+-- Source: https://github.com/GPep/ToolsDB/blob/master/SPs/SSMS_Usage.sql
+
+USE [Tools]
+GO
+
+SET ANSI_NULLS ON
+GO
+SET QUOTED_IDENTIFIER ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF OBJECT_ID('SSMS_Usage') IS NULL
+  EXEC ('CREATE PROCEDURE SSMS_Usage AS RETURN 0;')
+GO
+
+ALTER PROCEDURE [dbo].[SSMS_Usage]
+AS
+BEGIN
+
+-- =============================================
+-- Author:		Glenn Pepper using Adam Machanic's sp_whoisactive
+-- Create date: 2018-09-20
+-- Version: 1.0
+-- Description:	This Stored Procedure looks to see who has 
+-- been running queries on the SQL server by querying sp_whoisactive (Adam Machanic)
+-- an email will be sent to alert the DBAs
+-- =============================================
+
+DECLARE @ServerName NVARCHAR(50);
+DECLARE @EMAIL_SUBJECT NVARCHAR(250);
+DECLARE @SQL NVARCHAR(200);
+DECLARE @EMAILADDRESS NVARCHAR(200);
+
+SET @ServerName = @@SERVERNAME
+SET @EMAIL_SUBJECT = N'Users running queries in Production Environment ' + @ServerName
+SET @EMAILADDRESS = (SELECT Email_Address FROM msdb.dbo.sysoperators WHERE enabled = 1) 
+IF OBJECT_ID('tempdb.dbo.##PNode','u') IS NOT NULL
+BEGIN
+DROP TABLE ##PNode
+END
+
+IF OBJECT_ID('tempdb.dbo.##WIA','u') IS NOT NULL
+BEGIN
+DROP TABLE ##WIA
+END
+
+
+CREATE TABLE ##WIA(
+	[dd hh:mm:ss.mss] [varchar](8000) NULL,
+	[session_id] [smallint] NOT NULL,
+	[sql_text] [xml] NULL,
+	[sql_command] [xml] NULL,
+	[login_name] [nvarchar](128) NOT NULL,
+	[wait_info] [nvarchar](4000) NULL,
+	[tran_log_writes] [nvarchar](4000) NULL,
+	[CPU] [varchar](30) NULL,
+	[tempdb_allocations] [varchar](30) NULL,
+	[tempdb_current] [varchar](30) NULL,
+	[blocking_session_id] [smallint] NULL,
+	[reads] [varchar](30) NULL,
+	[writes] [varchar](30) NULL,
+	[physical_reads] [varchar](30) NULL,
+	[query_plan] [xml] NULL,
+	[used_memory] [varchar](30) NULL,
+	[status] [varchar](30) NOT NULL,
+	[tran_start_time] [datetime] NULL,
+	[open_tran_count] [varchar](30) NULL,
+	[percent_complete] [varchar](30) NULL,
+	[host_name] [nvarchar](128) NULL,
+	[database_name] [nvarchar](128) NULL,
+	[program_name] [nvarchar](128) NULL,
+	[start_time] [datetime] NOT NULL,
+	[login_time] [datetime] NULL,
+	[request_id] [int] NULL,
+	[collection_time] [datetime] NOT NULL
+)
+
+EXEC dbo.sp_WhoIsActive  @get_transaction_info = 1,  @get_outer_command = 1,  @get_plans = 1, @destination_table = ##WIA; 
+
+
+
+SELECT 
+distinct a.Session_id, a.login_name, a.CPU, a.blocking_session_id, a.reads, 
+a.writes, a.used_memory, a.tran_start_time, a.host_name, a.program_name, a.start_time, b.[duration_dd_hh:mm:ss.mss]
+INTO ##PNode
+FROM ##WIA AS a
+INNER JOIN (SELECT distinct session_id, login_name, MAX([dd hh:mm:ss.mss]) AS 'duration_dd_hh:mm:ss.mss'
+FROM ##WIA
+WHERE program_name LIKE '%Microsoft SQL Server Management Studio%'
+GROUP BY Session_id, login_name) AS B
+ON a.session_id = b.session_id
+AND a.login_name = b.login_name
+AND a.[dd hh:mm:ss.mss] = b.[duration_dd_hh:mm:ss.mss]
+WHERE program_name LIKE '%Microsoft SQL Server Management Studio%'
+--AND start_time >= DATEADD(hh,-1,getdate())
+--AND database_name = 'BBEC_V4' -- Database Specific
+--AND a.login_name NOT IN ('<AddLoginHere') --add Logins here you want removed from the report. Or comment this line  out
+
+
+IF (select count(*) from ##PNode) >0
+
+BEGIN 
+
+DECLARE @msg varchar(max), @tbl varchar(max), @tbl2 varchar(max), @tbl3 varchar(max)
+
+SET @tbl = '<font face=verdana size=2><B>These people have used SSMS in the last hour </b></font><br /><br />
+			<style type="text/css">h2, body {font-family: Arial, verdana;} table{font-size:11px; border-collapse:collapse;} td{background-color:#ffffff; border:1px solid black; padding:3px;} th{background-color:#46f610;border:1px solid black; padding:3px;}</style>
+			<table cellpadding=2 cellspacing=2><tr><th><B>Login_Name</B></th><th><B>CPU</B></th><th><B>Reads</B></th><th><B>Writes</B></th><th><B>Start_time</B></th><th><B>Duration</B></th></tr>'
+			+ 
+			cast((select td = Login_name , ''
+				, td = CPU, ''
+				, td = reads, ''
+				, td = writes, ''
+				, td = start_time, ''
+	, td = [duration_dd_hh:mm:ss.mss], ''
+				from ##PNode
+				 for xml path('tr'), type
+				) as varchar(max) )
+			+ '</table><BR>
+
+			<font face=verdana size=2><B>Please Check What they are doing!</b></font><br /><br />'
+
+exec msdb.dbo.sp_send_dbmail 
+	@profile_name = @ServerName,
+	@subject = @EMAIL_SUBJECT, 
+	@body = @tbl, @body_format = 'HTML', 
+	@recipients = @EmailAddress
+
+
+END
+
+DROP TABLE ##PNode
+DROP TABLE ##WIA
+
+
+END
