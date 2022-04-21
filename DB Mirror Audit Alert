@@ -1,0 +1,95 @@
+-- https://github.com/GPep/ToolsDB/blob/master/SPs/CheckMirrorStatus.sql
+USE [Tools]
+GO
+
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF OBJECT_ID('CheckMirrorStatus') IS NULL
+  EXEC ('CREATE PROCEDURE CheckMirrorStatus AS RETURN 0;')
+GO
+
+ALTER PROCEDURE CheckMirrorStatus
+AS
+BEGIN
+
+-- =============================================
+-- Author:		Glenn Pepper
+-- Create date: 2018-09-20
+-- Version 1.0
+-- Description:	This Stored Procedure checks the mirroring state of all mirrored databases. 
+-- If there are any issues then an email is sent to the Operator
+-- 
+-- =============================================
+
+
+DECLARE @state VARCHAR(30)
+
+DECLARE @DbMirrored INT
+
+DECLARE @DbId INT
+
+DECLARE @String VARCHAR(100)
+
+DECLARE @databases TABLE (DBNAME VARCHAR(200), mirroring_state_desc VARCHAR(30), 
+mirroring_partner_instance VARCHAR(30), Mirroring_status Varchar(30) )
+
+ 
+
+-- get status for mirrored databases
+
+INSERT INTO @databases(DBName, mirroring_state_desc, mirroring_partner_instance)
+
+SELECT DB_Name(Database_Id) AS DBName, mirroring_state_desc, mirroring_partner_instance
+
+FROM sys.database_mirroring
+
+WHERE mirroring_role_desc IN ('PRINCIPAL','MIRROR')
+
+AND mirroring_state_desc NOT IN ('SYNCHRONIZED','SYNCHRONIZING')
+
+ 
+
+-- iterate through mirrored databases and send email alert
+
+IF EXISTS (SELECT TOP 1 DBName FROM @databases WHERE mirroring_state_desc IS NOT NULL)
+
+BEGIN
+
+DECLARE @SERVERNAME NVARCHAR(50);
+DECLARE @EMAIL_SUBJECT NVARCHAR(250);
+DECLARE @EMAILADDRESS NVARCHAR(200);
+
+SET @SERVERNAME = @@SERVERNAME
+SET @EMAIL_SUBJECT = 'Host: '+@@servername+' - DB Mirroring is '+@state
+SET @EMAILADDRESS = (SELECT Email_Address FROM msdb.dbo.sysoperators WHERE enabled = 1)
+
+DECLARE @MSG VARCHAR(MAX), @TBL VARCHAR(MAX), @TBL2 VARCHAR(MAX), @TBL3 VARCHAR(MAX)
+
+	SET @TBL = '<FONT FACE=VERDANA SIZE=2><B>The Databases Below have indicated there is a problem with the Mirroring State</B></FONT><BR /><BR />
+			<STYLE TYPE="TEXT/CSS">H2, BODY {FONT-FAMILY: ARIAL, VERDANA;} TABLE{FONT-SIZE:11PX; BORDER-COLLAPSE:COLLAPSE;} TD{BACKGROUND-COLOR:#FFFFFF; BORDER:1PX SOLID BLACK; PADDING:3PX;} 
+			TH{BACKGROUND-COLOR:#46F610;BORDER:1PX SOLID BLACK; PADDING:3PX;}</STYLE>
+			<TABLE CELLPADDING=2 CELLSPACING=2><TR><TH><B>Database Name</B></TH><TH><B>Mirrored State</B></TH><TH><B>Mirror Partner</B></TH></TR>'
+			+ 
+
+				CAST((SELECT TD = DBName, '', TD=mirroring_state_desc, '', TD= Mirroring_Partner_Instance ,''
+				FROM @databases
+ FOR XML PATH('TR'), TYPE
+				) AS VARCHAR(MAX) )
+			+ '</TABLE><BR>
+
+			<FONT FACE=VERDANA SIZE=2><B>Please Check the Database Mirroring Status on both the Primary and Mirrored Server</B></FONT><BR /><BR />'
+
+		EXEC MSDB.DBO.SP_SEND_DBMAIL 
+			@PROFILE_NAME = @SERVERNAME,
+			@SUBJECT = @EMAIL_SUBJECT, 
+			@BODY = @TBL, @BODY_FORMAT = 'HTML', 
+			@RECIPIENTS = @EMAILADDRESS
+
+END
+
+END
