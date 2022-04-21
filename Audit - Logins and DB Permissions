@@ -1,0 +1,35 @@
+TSQL Script to Audit Logins and its DB Permissions on all databases.
+
+--Source: https://mssqlnuggets.wordpress.com/2013/04/04/sql-server-script-to-list-database-name-login-type-server-login-nameserver-role-database-user-and-database-role/
+
+CREATE TABLE [dbo].[#Temp] (
+[DATABASENAME] NVARCHAR(128) NULL,
+[LOGINTYPE] VARCHAR(30) NULL,
+[LoginName] CHAR(45) NULL,
+[ServerRole] CHAR(45) NULL,
+[DatabaseUser] CHAR(25) NULL,
+[DatabaseRole] CHAR(25) NULL)
+EXEC sp_msForEachDB
+' INSERT INTO #Temp
+select ''?'' As ''Database Name'',
+[Login Type]=
+case sp.type
+when ''u'' then ''WindowsLogin''
+when ''s'' then ''SQLLogin''
+when ''g'' then ''WindowsGroup''
+end,
+convert(char(45),sp.name) as srvLogin,
+convert(char(45),sp2.name) as srvRole,
+convert(char(25),dbp.name) as dbUser,
+convert(char(25),dbp2.name) as dbRole
+from
+sys.server_principals as sp join
+[?].sys.database_principals as dbp on sp.sid=dbp.sid join
+[?].sys.database_role_members as dbrm on dbp.principal_Id=dbrm.member_principal_Id join
+[?].sys.database_principals as dbp2 on dbrm.role_principal_id=dbp2.principal_id left join
+sys.server_role_members as srm on sp.principal_id=srm.member_principal_id left join
+sys.server_principals as sp2 on srm.role_principal_id=sp2.principal_id '
+
+SELECT LoginName, LoginType,ServerRole, DatabaseName, DatabaseUser, DatabaseRole FROM #Temp
+order by LoginName asc
+drop table  #Temp
