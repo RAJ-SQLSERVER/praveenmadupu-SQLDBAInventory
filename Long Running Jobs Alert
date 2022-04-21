@@ -1,0 +1,145 @@
+-- https://github.com/GPep/ToolsDB/blob/master/SPs/CheckLongRunningJobs.sql
+USE [Tools]
+GO
+
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF OBJECT_ID('CheckLongRunningJobs') IS NULL
+  EXEC ('CREATE PROCEDURE CheckLongRunningJobs AS RETURN 0;')
+GO
+
+
+
+ALTER PROCEDURE [dbo].[CheckLongRunningJobs] @time int = 120-- my default is 2 hours
+AS
+BEGIN
+
+-- =============================================
+-- Author:		Glenn Pepper
+-- Create date: 2018-09-20
+-- Version 1.0
+-- Description:	This Stored Procedure looks for any SQL jobs that have been 
+-- running for longer than the specified time (in minutes)
+-- =============================================
+
+DECLARE @THRESHOLD INT; -- Time in mins
+DECLARE @ROW_COUNT INT;
+DECLARE @ServerName NVARCHAR(50);
+DECLARE @EMAIL_SUBJECT NVARCHAR(250);
+DECLARE @EMAILADDRESS NVARCHAR(200);
+
+SET @ServerName = @@SERVERNAME
+SET @EMAIL_SUBJECT = N'Long running SQL jobs on ' + @ServerName
+SET @THRESHOLD = @time -- default is 120 (2 hours)
+SET @EMAILADDRESS = (SELECT Email_Address FROM MSDB.dbo.sysoperators WHERE enabled = 1)
+
+IF EXISTS
+(SELECT * FROM CRjobs)
+BEGIN
+TRUNCATE TABLE CRjobs
+END
+
+IF OBJECT_ID('tempdb.dbo.##LRJOBS','u') IS NOT NULL
+BEGIN
+DROP TABLE ##LRJOBS
+END
+
+------
+-- This gets the new information in one spot for modification further down
+------
+SELECT
+		SUBSTRING(J.NAME,0,30) AS JOB_NAME
+	,j.job_id AS JOBID
+	,CONVERT(VARCHAR(30),a.start_execution_date,113) AS Job_start_time
+	,a.session_id as Session_id
+	,datediff(MI,a.run_requested_date,getdate()) as 'Mins Run'
+	INTO ##LRJOBS
+FROM msdb.dbo.sysjobs j
+INNER JOIN msdb.dbo.sysjobactivity a ON a.job_id=j.job_id
+INNER JOIN (SELECT MAX(session_id) AS sessid FROM msdb..syssessions) s ON a.session_id = s.sessid
+WHERE start_execution_date IS NOT NULL AND stop_execution_date IS NULL
+AND DATEDIFF(MI,a.start_execution_date, getdate()) > @THRESHOLD
+
+
+------
+-- Inserts the new data into the Actual table CRJOBS
+------
+
+INSERT INTO tools.dbo.CRjobs 
+(Jobid, Startdate, SessionID, Runrequestdate, [Status])
+SELECT
+	JOBID
+	,Job_start_time
+	,Session_id
+	,[Mins Run]
+	, '0'
+	FROM ##LRJOBS
+
+
+DECLARE @LJ NVARCHAR(250);
+DECLARE @LJ1 NVARCHAR(250);
+
+SELECT @LJ =  jobid FROM TOOLS.DBO.CRjobs
+SELECT @LJ1 =  JOBID FROM ##LRJOBS
+
+------
+-- Sends DBA team an email
+------
+if (select count(*) from ##LRJOBS) >0
+
+Begin
+
+DECLARE @msg varchar(max), @tbl varchar(max), @tbl2 varchar(max), @tbl3 varchar(max)
+
+SET @tbl = '<font face=verdana size=2><B>These SQL jobs have been running for longer than expected. </b></font><br /><br />
+			<style type="text/css">h2, body {font-family: Arial, verdana;} table{font-size:11px; border-collapse:collapse;} td{background-color:#ffffff; border:1px solid black; padding:3px;} th{background-color:#46f610;border:1px solid black; padding:3px;}</style>
+			<table cellpadding=2 cellspacing=2><tr><th><B>Job Name</B></th><th><B>Job Start Time</B></th><th><B>Session ID</B></th><th><B>Minutes Run</B></th></tr>'
+			+ 
+			cast((select td = JOB_NAME , ''
+				, td = Job_start_time, ''
+				, td = Session_id, ''
+	, td = [Mins Run], ''
+				from ##LRJOBS
+				 for xml path('tr'), type
+				) as varchar(max) )
+			+ '</table><BR>
+
+			<font face=verdana size=2><B>Check if there is any underlying issues as to why this is overrun.</b></font><br /><br />'
+
+exec msdb.dbo.sp_send_dbmail 
+	@profile_name = @@SERVERNAME,
+	@subject = @EMAIL_SUBJECT, 
+	@body = @tbl, @body_format = 'HTML', 
+	@recipients = @EMAILADDRESS
+
+	END
+
+IF (SELECT COUNT(*) FROM dbo.CRjobs) > 0
+BEGIN
+------
+-- Updates [STATUS] CRJOBS data once email has been sent
+------
+
+SELECT * FROM tools.dbo.CRjobs
+WHERE [STATUS] = 0 -->0
+
+	BEGIN
+
+UPDATE tools.dbo.CRjobs
+SET status = 1
+WHERE status = 0
+
+	END
+END
+
+DROP TABLE ##LRJOBS
+
+END
+
+GO
+
