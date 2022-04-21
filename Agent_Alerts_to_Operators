@@ -1,0 +1,120 @@
+SQLServerAgent_Alerts_CreateAlertsSeverError
+
+--https://github.com/paultreadwell44/SQLSalt/blob/master/SQLServerAgent/Alerts/SQLServerAgent_Alerts_CreateAlertsSeverError.sql
+
+
+/**********************************************************
+Author: Thomas Stringer
+Created on: 4/26/2012
+
+Description:
+	this script creates alerts for all severe errors and 
+	emails them to the desired operator
+
+Notes:
+	- set @operator_name var to the name of the operator 
+	to alert
+**********************************************************/
+
+declare
+	@operator_name sysname = 'YourOperator'
+
+
+
+exec msdb.dbo.sp_add_alert 
+	@name = N'SeverErrors19', 
+	@message_id = 0, 
+	@severity = 19, 
+	@enabled = 1, 
+	@delay_between_responses = 0, 
+	@include_event_description_in = 1, -- event desc in email
+	@job_id = N'00000000-0000-0000-0000-000000000000'
+
+exec msdb.dbo.sp_add_notification 
+	@alert_name = N'SeverErrors19', 
+	@operator_name = @operator_name, 
+	@notification_method = 1 -- email
+
+exec msdb.dbo.sp_add_alert 
+	@name = N'SeverErrors20', 
+	@message_id = 0, 
+	@severity = 20, 
+	@enabled = 1, 
+	@delay_between_responses = 0, 
+	@include_event_description_in = 1, -- event desc in email
+	@job_id = N'00000000-0000-0000-0000-000000000000'
+
+exec msdb.dbo.sp_add_notification 
+	@alert_name = N'SeverErrors20', 
+	@operator_name = @operator_name, 
+	@notification_method = 1 -- email
+
+exec msdb.dbo.sp_add_alert 
+	@name = N'SeverErrors21', 
+	@message_id = 0, 
+	@severity = 21, 
+	@enabled = 1, 
+	@delay_between_responses = 0, 
+	@include_event_description_in = 1, -- event desc in email
+	@job_id = N'00000000-0000-0000-0000-000000000000'
+
+exec msdb.dbo.sp_add_notification 
+	@alert_name = N'SeverErrors21', 
+	@operator_name = @operator_name, 
+	@notification_method = 1 -- email
+
+exec msdb.dbo.sp_add_alert 
+	@name = N'SeverErrors22', 
+	@message_id = 0, 
+	@severity = 22, 
+	@enabled = 1, 
+	@delay_between_responses = 0, 
+	@include_event_description_in = 1, -- event desc in email
+	@job_id = N'00000000-0000-0000-0000-000000000000'
+
+exec msdb.dbo.sp_add_notification 
+	@alert_name = N'SeverErrors22', 
+	@operator_name = @operator_name, 
+	@notification_method = 1 -- email
+
+exec msdb.dbo.sp_add_alert 
+	@name = N'SeverErrors23', 
+	@message_id = 0, 
+	@severity = 23, 
+	@enabled = 1, 
+	@delay_between_responses = 0, 
+	@include_event_description_in = 1, -- event desc in email
+	@job_id = N'00000000-0000-0000-0000-000000000000'
+
+exec msdb.dbo.sp_add_notification 
+	@alert_name = N'SeverErrors23', 
+	@operator_name = @operator_name, 
+	@notification_method = 1 -- email
+
+exec msdb.dbo.sp_add_alert 
+	@name = N'SeverErrors24', 
+	@message_id = 0, 
+	@severity = 24, 
+	@enabled = 1, 
+	@delay_between_responses = 0, 
+	@include_event_description_in = 1, -- event desc in email
+	@job_id = N'00000000-0000-0000-0000-000000000000'
+
+exec msdb.dbo.sp_add_notification 
+	@alert_name = N'SeverErrors24', 
+	@operator_name = @operator_name, 
+	@notification_method = 1 -- email
+
+exec msdb.dbo.sp_add_alert 
+	@name = N'SeverErrors25', 
+	@message_id = 0, 
+	@severity = 25, 
+	@enabled = 1, 
+	@delay_between_responses = 0, 
+	@include_event_description_in = 1, -- event desc in email
+	@job_id = N'00000000-0000-0000-0000-000000000000'
+
+exec msdb.dbo.sp_add_notification 
+	@alert_name = N'SeverErrors25', 
+	@operator_name = @operator_name, 
+	@notification_method = 1 -- email
