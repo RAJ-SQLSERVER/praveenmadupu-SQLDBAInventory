@@ -1,0 +1,165 @@
+TSQL Script to Identify and Update Database Auto-Growth Settings.
+
+-- https://dataginger.com/2014/06/25/sql-server-script-to-identify-and-update-database-auto-growth-setting/ 
+
+•	An auto-growth event is the process by which the SQL Server engine expands the size of a database file when it runs out of space. 
+•	The amount by which a database file should grow is determined by the value that is set in the SQL configuration. 
+•	While every organization has its own standards for this setting, however there are some widely followed best practices like for instance the auto-growth setting should not be in percent value
+•	In this post Author have put down two scripts that you can customize per your organizational standards. 
+•	The first script helps you to identify the current settings and the second one can be used to update auto-growth settings. 
+•	Both the scripts are targeted for all the databases by default, however you can call out the databases that you want to exclude from this change. 
+•	Please make sure that you test these changes before pushing out to production servers.
+
+Script 1: Identify the current database settings
+
+select DB_NAME(mf.database_id) database_name
+, mf.name logical_name
+, CONVERT (DECIMAL (20,2) , (CONVERT(DECIMAL, size)/128)) [file_size_MB]
+, CASE mf.is_percent_growth
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [is_percent_growth]
+, CASE mf.is_percent_growth
+WHEN 1 THEN CONVERT(VARCHAR, mf.growth) + '%'
+WHEN 0 THEN CONVERT(VARCHAR, mf.growth/128) + ' MB'
+END AS [growth_in_increment_of]
+, CASE mf.is_percent_growth
+WHEN 1 THEN
+CONVERT(DECIMAL(20,2), (((CONVERT(DECIMAL, size)*growth)/100)*8)/1024)
+WHEN 0 THEN
+CONVERT(DECIMAL(20,2), (CONVERT(DECIMAL, growth)/128))
+END AS [next_auto_growth_size_MB]
+, CASE mf.max_size
+WHEN 0 THEN 'No growth is allowed'
+WHEN -1 THEN 'File will grow until the disk is full'
+ELSE CONVERT(VARCHAR, mf.max_size)
+END AS [max_size]
+, physical_name
+from sys.master_files mf
+
+Script 2: Update database auto-growth values
+
+/*
+****MODIFICATION REQUIRED for AUTOGROWTH ****
+1) Use this script to change the auto growth setting of for all databases or for single DB
+2) If you want to exclude any database add the DBs in the WHERE Clause
+3) Tested in 2012 and 2014 SQL Servers
+*/
+
+IF EXISTS(SELECT name FROM sys.sysobjects WHERE name = N'ConfigAutoGrowth' AND xtype='U')
+DROP TABLE ConfigAutoGrowth
+GO
+CREATE TABLE DBO.ConfigAutoGrowth
+(
+iDBID INT,
+sDBName SYSNAME,
+vFileName VARCHAR(max),
+vGrowthOption VARCHAR(12)
+)
+PRINT 'Table ConfigAutoGrowth Created'
+GO
+-- Inserting data into staging table
+INSERT INTO DBO.ConfigAutoGrowth
+SELECT
+SD.database_id,
+SD.name,
+SF.name,
+CASE SF.status
+WHEN 1048576 THEN 'Percentage'
+WHEN 0 THEN 'MB'
+END AS 'GROWTH Option'
+FROM SYS.SYSALTFILES SF
+JOIN
+SYS.DATABASES SD
+ON
+SD.database_id = SF.dbid
+GO
+
+-- Dynamically alters the file to set auto growth option to fixed mb
+DECLARE @name VARCHAR ( max ) -- Database Name
+DECLARE @dbid INT -- DBID
+DECLARE @vFileName VARCHAR ( max ) -- Logical file name
+DECLARE @vGrowthOption VARCHAR ( max ) -- Growth option
+DECLARE @Query VARCHAR(max) -- Variable to store dynamic sql
+
+DECLARE db_cursor CURSOR FOR
+SELECT
+idbid,sdbname,vfilename,vgrowthoption
+FROM configautogrowth
+WHERE sdbname  IN ( 'tempdb' ) --<<--ADD DBs TO include
+--AND vGrowthOption = 'Percentage' or 'Mb'
+
+OPEN db_cursor
+FETCH NEXT FROM db_cursor INTO @dbid,@name,@vfilename,@vgrowthoption
+WHILE @@FETCH_STATUS = 0
+BEGIN
+PRINT 'Changing AutoGrowth option for database:- '+ UPPER(@name)
+
+/******If you want to change the auto growth size to a different 
+value then just modify the filegrowth value in script below *********/
+
+SET @Query = 'ALTER DATABASE '+ '[' + @name + ']' +'
+MODIFY FILE (NAME = '+ '[' +@vFileName + ']' +',FILEGROWTH = 256 MB)' --<<--ADD AUTO GROWTH SIZE HERE
+EXECUTE(@Query)
+
+FETCH NEXT FROM db_cursor INTO @dbid,@name,@vfilename,@vgrowthoption
+END
+CLOSE db_cursor -- Closing the curson
+DEALLOCATE db_cursor -- deallocating the cursor
+
+GO
+
+-- Querying system views to see if the changes are applied
+
+DECLARE @SQL VARCHAR(8000), @sname VARCHAR(3)
+SET @SQL=' USE [?]
+SELECT ''?'' [Dbname]
+,[name] [Filename]
+,CASE is_percent_growth
+WHEN 1 THEN CONVERT(VARCHAR(5),growth)+''%''
+ELSE CONVERT(VARCHAR(20),(growth/128))+'' MB''
+END [Autogrow_Value]
+,CASE max_size
+WHEN -1 THEN CASE growth
+WHEN 0 THEN CONVERT(VARCHAR(30),''Restricted'')
+ELSE CONVERT(VARCHAR(30),''Unlimited'') END
+ELSE CONVERT(VARCHAR(25),max_size/128)
+END [Max_Size]
+FROM [?].sys.database_files'
+
+IF EXISTS(SELECT 1 FROM tempdb..sysobjects WHERE name='##Fdetails')
+DROP TABLE ##Fdetails
+CREATE TABLE ##Fdetails
+(Dbname VARCHAR(50),Filename VARCHAR(50),
+Autogrow_Value VARCHAR(15),Max_Size VARCHAR(30))
+INSERT INTO ##Fdetails
+EXEC sp_msforeachdb @SQL
+SELECT * FROM ##Fdetails 
+where dbname = 'tempdb' ORDER BY Dbname
+
+--Dropping the staging table
+DROP TABLE ConfigAutoGrowth
+GO
+
+Other Reference Links: 
+
+https://www.sqlrx.com/find-and-modify-file-growth-settings-for-all-databases/
+
+If Database (mdf) size is:
+•	BETWEEN 0 AND 10 (MB), set FILEGROWTH to 10MB –> FILEGROWTH = 10
+•	BETWEEN 10 AND 50 (MB), set FILEGROWTH to 20MB –> FILEGROWTH = 20
+•	BETWEEN 50 AND 200 (MB), set FILEGROWTH to 50MB –> FILEGROWTH = 50
+•	BETWEEN 200 AND 1000 (MB), set FILEGROWTH to 100MB –> FILEGROWTH = 100
+•	BETWEEN 1000 AND 20000 (MB), set FILEGROWTH to 250MB –> FILEGROWTH = 250
+•	BETWEEN 20000 AND 40000 (MB), set FILEGROWTH to 500MB –> FILEGROWTH = 500
+•	BETWEEN 40000 AND 100000 (MB), set FILEGROWTH to 1000MB –> FILEGROWTH = 1000
+•	BETWEEN 100000 AND 200000 (MB), set FILEGROWTH to 2000MB –> FILEGROWTH = 2000
+•	BETWEEN 200000 AND 300000 (MB), set FILEGROWTH to 3000MB –> FILEGROWTH = 3000
+•	BETWEEN 300000 AND 400000 (MB), set FILEGROWTH to 4000MB –> FILEGROWTH = 4000
+The idea for file growth for log files is to make the growth increments big enough to keep virtual log files (VLF’s) to a minimum.  It is vastly different than managing a data file (mdf).
+
+If Tlog (ldf) size is:
+•	BETWEEN 0 AND 2000 (MB), set FILEGROWTH to 250MB –> FILEGROWTH = 250
+•	BETWEEN 2000 AND 4500 (MB), set FILEGROWTH to 500MB –> FILEGROWTH = 500
+•	BETWEEN 4500 AND 200000 (MB), set FILEGROWTH to 1000MB –> FILEGROWTH = 1000
+•	BETWEEN 200000 AND 500000 (MB), set FILEGROWTH to 1000MB –> FILEGROWTH = 2000
