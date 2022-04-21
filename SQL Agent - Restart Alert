@@ -1,0 +1,60 @@
+-- Source: https://github.com/GPep/ToolsDB/blob/master/SPs/SQLAgentBootUpAlert.sql
+USE [Tools]
+GO
+
+
+SET ANSI_NULLS ON
+GO
+
+SET QUOTED_IDENTIFIER ON
+GO
+
+IF OBJECT_ID('SQLAgentBootUpAlert') IS NULL
+  EXEC ('CREATE PROCEDURE SQLAgentBootUpAlert AS RETURN 0;')
+GO
+
+
+ALTER PROCEDURE SQLAgentBootUpAlert
+AS
+BEGIN
+
+-- =============================================
+-- Author:		Glenn Pepper
+-- Create date: 2018-09-18
+-- Version: 1.0
+-- Description:	This Stored Procedure reports on when the SQL Agent has been rebooted
+-- This normally executed on startup of SQL Agent to inform the DBAs what has happened
+-- =============================================
+
+DECLARE @body1 NVARCHAR(MAX)
+DECLARE @SERVERNAME VARCHAR(200);
+DECLARE @EMAILSUBJECT VARCHAR(200);
+DECLARE @EMAILADDRESS VARCHAR(200);
+
+SET @SERVERNAME = @@SERVERNAME
+SET @EMAILSUBJECT = N' SQL Agent restart on ' + @SERVERNAME
+SET @EMAILADDRESS = (SELECT Email_Address FROM msdb.dbo.sysoperators WHERE enabled = 1)
+
+SELECT @EMAILADDRESS
+
+SELECT @body1='<font face=verdana size=2><B>This SQL service Agent has either been restarted or been started up again. Please Investigate</b></font><br /><br />
+			<style type="text/css">h2, body {font-family: Arial, verdana;} table{font-size:11px; border-collapse:collapse;} td{background-color:#F1F1F1; border:1px solid black; padding:3px;} 
+			th{background-color:#99CCFF;border:1px solid black; padding:3px;}</style>
+			<table cellpadding=2 cellspacing=2><tr><th><B>Service name</B></th><th><B>Start time</B></th><th><B>Status</B></th></tr>'
+			+ 
+			cast((select td = servicename , ''
+				, td = getdate(), ''
+				, td = status_desc, ''
+				from sys.dm_server_services as TD 
+				where last_startup_time is not null for xml path('tr'), type
+				) as varchar(max) )
+			+ '</table><BR>'
+
+EXEC msdb.dbo.sp_send_dbmail
+       @profile_name = @SERVERNAME,  -- Use valid database mail profile here
+       @subject = @EMAILSUBJECT,
+       @body = @body1,@body_format = 'HTML',
+	   @recipients = @EMAILADDRESS  -- Use valid email address here
+
+
+END
