@@ -1,0 +1,42 @@
+SQL Agent Jobs-Automate SQL Server jobs Creation Using PowerShell
+
+--Source: https://omkarclouddba.tech/?p=114
+
+-- Using below PowerShell script you can create same job on multiple SQL Server. 
+-- This is will automate process and reduce manual efforts to create same SQL Server jobs on Multiple SQL Server Instance.
+==============================================================================
+Step 1 : Create List of server name text file. 
+--E.g. ListOfServers.txt and add server name where you want to create SQL Server jobs.
+
+Step 2. : Execute below script.
+-- Before execution change login and password in script. 
+-- Change SQLJobStep.Command as per your jobs type. 
+-- Change database name in SQLJobStep.DatabaseName
+==============================================================================
+$ServerList = Get-Content E:\DBA\Powershell\ListOfServers.txt
+foreach ($srv in $ServerList)
+{
+    $SQLSvr = New-Object -TypeName  Microsoft.SQLServer.Management.Smo.Server($srv)
+$SQLSvr.ConnectionContext.LoginSecure = $false
+$SQLSvr.ConnectionContext.Login=”sa”
+$SQLSvr.ConnectionContext.Password=”Pnx@2019″
+
+    $SQLJob = New-Object -TypeName Microsoft.SqlServer.Management.SMO.Agent.Job -argumentlist    $SQLSvr.JobServer, “Example1_Job”
+    $SQLJob.Create()
+
+    $SQLJobStep = New-Object -TypeName Microsoft.SqlServer.Management.SMO.Agent.JobStep -argumentlist $SQLJob, “Example1_Job_Step”
+    $SQLJobStep.Command = “select * from sys.databases”
+    $SQLJobStep.DatabaseName = “master”
+    $SQLJobStep.Create()
+
+    $SQLJobSchedule =  New-Object -TypeName Microsoft.SqlServer.Management.SMO.Agent.JobSchedule -argumentlist $SQLJob, “Example1_Job_Schedule”
+
+    $SQLJobSchedule.FrequencyTypes =  “Daily”
+    $SQLJobSchedule.FrequencyInterval = 1
+
+    $TimeSpan1 = New-TimeSpan -hours 13 -minutes 30
+    $SQLJobSchedule.ActiveStartTimeofDay = $TimeSpan1
+
+    $SQLJobSchedule.ActiveStartDate = get-date
+    $SQLJobSchedule.create()
+}
