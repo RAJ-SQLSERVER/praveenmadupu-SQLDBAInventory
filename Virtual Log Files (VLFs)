@@ -1,0 +1,116 @@
+Virtual Log Files (VLFs)
+
+--https://repltalk.com/2011/08/31/stop-and-checked-your-virtual-log-files-vlfs/
+
+Is your transaction log over 5gb?  Have you checked to see how many Virtual Log Files (VLFs) exists in your transaction logs?  
+If not, I would suggest you add to your many list of high priority tasks checks to see how many VLFs exists for your transaction logs.  
+A large number of VLFs are result of a small transaction log growth setting leading to long delays bringing DB online following a restart of SQL Server or 
+significantly increase time applying Transaction Log Restores.  
+A long recovery or long restore is something you’ll definitely want to avoid on high-volume or business critical databases.
+
+As you can see from the REFERENCES below a large number of VLFs can impact recovery time.  
+As noted in KB article 2455009, a fix is provide to improve the recovery time.  
+In addition to recovery, a high number of VLFs can also impact restoring of Transaction Log.  
+The fix mentioned below does not improve time restoring transaction log backups when a large number of VLFs exists.
+
+You can use the steps below to investigate how many VLFs exists in your database transaction logs. 
+If you see more then 5K or 10K, consider shrinking your transaction log, and increase the Log Growth size to a large value to allow the transaction log to grow in larger increments.
+
+Reference Articles
+2455009 FIX: Slow performance when you recover a database if there are many VLFs inside the transaction log in SQL Server 2005, 
+in SQL Server 2008 or in SQL Server 2008 R2
+http://support.microsoft.com/default.aspx?scid=kb;EN-US;2455009
+
+How It Works: What is Restore/Backup Doing?
+http://blogs.msdn.com/b/psssql/archive/2008/01/23/how-it-works-what-is-restore-backup-doing.aspx
+
+How a log file structure can affect database recovery time
+http://blogs.msdn.com/b/psssql/archive/2009/05/21/how-a-log-file-structure-can-affect-database-recovery-time.aspx
+
+Transaction Log Physical Architecture
+http://msdn.microsoft.com/en-us/library/ms179355.aspx
+
+Determine VLFs
+
+-- DBCC LOGINFO CHECKS  (using sample database AdventureWorks2008)
+-- Transaction logs in +50gb may take 30 minutes or more to analyze.
+-- OPTION 1
+DBCC LOGINFO('AdventureWorks2008')
+
+-- OPTION 2
+USE AdventureWorks2008
+GO
+DBCC LOGINFO
+
+-- OPTION 3
+-- Create temporary table to report loginfo data
+CREATE TABLE #LOGINFO( 
+      [FileId] [tinyint] NULL,
+      [FileSize] [bigint] NULL,
+      [StartOffset] [bigint] NULL,
+      [FSeqNo] [int] NULL,
+      [Status] [tinyint] NULL,
+      [Parity] [tinyint] NULL,
+      [CreateLSN] [numeric](25, 0) NULL
+) ON [PRIMARY]
+GO
+ 
+--Extract Log Data
+INSERT INTO #LOGINFO
+EXEC ('DBCC LOGINFO(''AdventureWorks2008'') WITH NO_INFOMSGS')
+
+--Display Active v. Free with filenames
+;with vlfUse as 
+( 
+select fileid, 
+sum(case when status = 0 then 1 else 0 end) as Free, 
+sum(case when status != 0 then 1 else 0 end) as InUse 
+from #LOGINFO
+group by fileid 
+) 
+select * from vlfUse v 
+inner join sys.database_files f on v.fileid = f.file_id
+GO
+
+DROP TABLE #LOGINFO
+GO
+
+-- OPTION 4
+-- Create database and table to save loginfo data
+-- Useful for sending LogInfo to Microsoft SQL Support for analysis
+Create Database MS_LogInfo
+GO
+USE [MS_LogInfo]
+GO
+
+IF  EXISTS (SELECT * FROM sys.objects WHERE object_id = OBJECT_ID(N'[dbo].[LOGINFO]') AND type in (N'U'))
+
+DROP TABLE [dbo].[LOGINFO]
+GO
+
+CREATE TABLE [dbo].[LOGINFO](
+      [FileId] [tinyint] NULL,
+      [FileSize] [bigint] NULL,
+      [StartOffset] [bigint] NULL,
+      [FSeqNo] [int] NULL,
+      [Status] [tinyint] NULL,
+      [Parity] [tinyint] NULL,
+      [CreateLSN] [numeric](25, 0) NULL
+) ON [PRIMARY]
+GO
+
+--Extract Log Data
+INSERT INTO LOGINFO
+EXEC ('DBCC LOGINFO(''AdventureWorks2008'') WITH NO_INFOMSGS')
+
+--Display Active v. Free with filenames
+;with vlfUse as 
+( 
+select fileid, 
+sum(case when status = 0 then 1 else 0 end) as Free, 
+sum(case when status != 0 then 1 else 0 end) as InUse 
+from LOGINFO
+group by fileid 
+) 
+select * from vlfUse v 
+inner join sys.database_files f on v.fileid = f.file_id
