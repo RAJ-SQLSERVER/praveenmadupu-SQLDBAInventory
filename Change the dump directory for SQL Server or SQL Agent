@@ -1,0 +1,41 @@
+Change the dump directory for SQL Server or SQL Agent
+
+https://maq.guru/sqlserverdumpdirectory/
+
+If you want to change the dump directory of SQL Server dump files (.mdmp extension) from the default location. 
+You can do this using “SQL Server Configuration Manager”
+
+Start SQL Server Configuration Manager
+Right Click on SQL Server Instance and select Properties
+Go to Advanced Tab and change Dump Directory
+If you want to do it on hundreds of SQL Servers, it will be a time consuming exercise. 
+Thanks to PowerShell. 
+It will do this for you in a few minutes, if not seconds.
+
+I have prepared this script in response to #SQLHELP request. 
+Tested this script only on Windows Server 2012 R2 with PowerShell 5.0
+=================================================================================
+$Servers= Get-Content -Path 'C:\TEMP\ServerList.txt'
+ForEach ($Server in $Servers)
+{
+    "Updating Server : $Server"
+    Invoke-Command -ComputerName $Server -ScriptBlock {
+        $NewLocation="H:\Program Files\Microsoft SQL Server\MSSQL12.MSSQLSERVER\MSSQL\LOG"
+        $Reg = "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server"
+        $Instances = (Get-ItemProperty $Reg).InstalledInstances
+    
+        ForEach ($Instance in $Instances)
+        {
+            $Ins =  (Get-ItemProperty "$Reg\Instance Names\SQL").$Instance
+            $Path = $Reg+"\"+$Ins
+            "Instance : $Instance"
+            "ErrorDumpDir_BeforeChange  : "+ (Get-ItemProperty "$Path\CPE").ErrorDumpDir
+            $KeyPath="$Path\CPE"
+            Set-ItemProperty -Path $KeyPath -Name ErrorDumpDir -Value $NewLocation
+            "ErrorDumpDir_AfterChange  : "+ (Get-ItemProperty "$Path\CPE").ErrorDumpDir
+        }#ForEach $Instances
+    }#ScriptBlock
+}#ForEachServers
+
+
+
