@@ -1,0 +1,77 @@
+Certificate Based Authentication
+
+--https://github.com/imajaydwivedi/SQLDBA-SSMS-Solution/blob/master/sp_HealthCheck/Certificate%20Based%20Authentication.sql
+
+USE master
+GO
+/*	***************************************************************
+*	CREATE CERTIFICATE IN [MASTER]
+*	**************************************************************/
+
+CREATE CERTIFICATE [CodeSigningCertificate]
+	ENCRYPTION BY PASSWORD = '$tr0ngp@$$w0rd'
+	WITH EXPIRY_DATE = '2099-01-01'
+		,SUBJECT = 'DBA Code Signing Cert'
+GO
+
+CREATE LOGIN [CodeSigningLogin] FROM CERTIFICATE [CodeSigningCertificate];
+GO
+CREATE USER [CodeSigningLogin] FROM CERTIFICATE [CodeSigningCertificate];
+GO
+EXEC master..sp_addsrvrolemember @loginame = N'CodeSigningLogin', @rolename = N'sysadmin'
+GO
+
+
+/*	***************************************************************
+*	Sign Stored Procedure with CERTIFICATE in MASTER
+*	**************************************************************/
+GRANT EXECUTE ON dbo.sp_Kill TO [CodeSigningLogin];
+GO
+ADD SIGNATURE TO [dbo].[sp_Kill]
+	BY CERTIFICATE [CodeSigningCertificate]
+	WITH PASSWORD = '$tr0ngp@$$w0rd'
+GO
+GRANT EXECUTE ON OBJECT::dbo.sp_Kill TO [public]
+GO
+
+
+/*	***************************************************************
+*	Backup CERTIFICATE in MASTER with Private Key (Important)
+*	**************************************************************/
+USE master
+GO
+BACKUP CERTIFICATE [CodeSigningCertificate] TO FILE = 'C:\temp\CodeSigningCertificate.cer'
+	WITH PRIVATE KEY (FILE = 'C:\temp\CodeSigningCertificate_WithKey.pvk',
+					  ENCRYPTION BY PASSWORD = '$tr0ngp@$$w0rd',
+					  DECRYPTION BY PASSWORD = '$tr0ngp@$$w0rd'
+					  );
+GO
+
+/*	***************************************************************
+*	Restore Certificate in [DBA] database
+*	**************************************************************/
+USE DBA
+GO
+CREATE CERTIFICATE [CodeSigningCertificate] FROM FILE = 'C:\temp\CodeSigningCertificate.cer'
+	WITH PRIVATE KEY (FILE = 'C:\temp\CodeSigningCertificate_WithKey.pvk',
+					  ENCRYPTION BY PASSWORD = '$tr0ngp@$$w0rd',
+					  DECRYPTION BY PASSWORD = '$tr0ngp@$$w0rd'
+					  );
+GO
+CREATE USER [CodeSigningLogin] FROM CERTIFICATE [CodeSigningCertificate];
+GO
+GRANT EXECUTE ON dbo.usp_WhoIsActive_Blocking TO [CodeSigningLogin];
+GO
+
+
+/*	***************************************************************
+*	Sign Stored Procedure with CERTIFICATE
+*	**************************************************************/
+USE DBA
+GO
+ADD SIGNATURE TO [dbo].usp_WhoIsActive_Blocking
+	BY CERTIFICATE [CodeSigningCertificate]
+	WITH PASSWORD = '$tr0ngp@$$w0rd'
+GO
+GRANT EXECUTE ON OBJECT::dbo.usp_WhoIsActive_Blocking TO [public]
+GO
