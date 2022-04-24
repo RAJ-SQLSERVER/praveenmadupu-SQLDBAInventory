@@ -1,0 +1,103 @@
+Powershell - Deploy Scripts From GitHub to Multiple SQL Servers
+
+--https://sqlundercover.com/2017/11/27/using-powershell-to-deploy-scripts-from-github-to-multiple-sql-servers/
+
+The following scripts go out to your GitHub repository, pullback the scripts and run them on your specified SQL instances. 
+I’ve purposely avoided using POSH-Git in these scripts as I wanted them to be something that could be run without the need to install Git.
+
+Script-1: 
+
+Run A Single Specific Script On SQL1 and SQL2
+$ScriptURL should be set to the URL of the raw script
+========================================================
+Add-PSSnapin SqlServerCmdletSnapin120
+Add-PSSnapin SqlServerProviderSnapin120
+ 
+#set variables
+$ScriptURL="https://raw.githubusercontent.com/SQLUndercover/UndercoverToolbox/master/sp_restorescript.sql"
+$SQLInstances = "SQL1,SQL2"
+$DefaultDatabase = "master"
+ 
+ForEach ($SQLInstance in $SQLInstances.Split(","))
+{
+ echo "Running Scripts on " $SQLInstance
+$ScriptFromGit = Invoke-WebRequest $ScriptURL
+ 
+Invoke-Sqlcmd -Query $ScriptFromGit.Content -ServerInstance $SQLInstance -database $DefaultDatabase
+}
+============================================================
+Script-2: 
+
+Run All Scripts From Specified Repository
+$GitRepository should be set to the URL or the repository or folder within the repository that holds your scripts
+=============================================================
+Add-PSSnapin SqlServerCmdletSnapin120
+Add-PSSnapin SqlServerProviderSnapin120
+ 
+#set variables
+$GitRepository = "https://github.com/SQLUndercover/UndercoverToolbox"
+$SQLInstances = "SQL1,SQL2"
+$DefaultDatabase = "master"
+ 
+ForEach ($SQLInstance in $SQLInstances.Split(","))
+{
+echo "Running Scripts on " $SQLInstance
+ 
+#get all sql files from GIT repository
+$files = (Invoke-WebRequest $GitRepository).Links | ? href -like *.sql
+ 
+#loop through all files and run them into SQL
+foreach ($file in $files.href)
+{
+$ScriptURL = ("https://raw.githubusercontent.com" + $file.Replace("/blob/","/"))
+echo "Running " $ScriptURL
+$ScriptFromGit = Invoke-WebRequest $ScriptURL
+ 
+Invoke-Sqlcmd -Query $ScriptFromGit.Content -ServerInstance $SQLInstance -database $DefaultDatabase
+}
+}
+================================================================
+
+The above scrip will run all the scripts in the repository and in no particular order.  
+What do we do if we only want to run in specific scripts or to run them in a certain order.  
+In that case I decided to add a manifest file.  
+This is just a text file that contains the scripts that you want to run and the order that they should be run.  
+It a simple text file which lists the name of each script on a separate line, in the order that you want them run.
+
+Script-3: 
+
+Run Scrips As Specified in the Manifest
+$GitManifestURL is the URL of the raw manifest file.
+
+==================================================================
+Add-PSSnapin SqlServerCmdletSnapin120
+Add-PSSnapin SqlServerProviderSnapin120
+ 
+#set variables
+$GitRepository = "https://github.com/SQLUndercover/UndercoverToolbox"
+$GitManifestURL = "https://raw.githubusercontent.com/SQLUndercover/UndercoverToolbox/master/Manifest.txt"
+$SQLInstances = "SQL1,SQL2"
+$DefaultDatabase = "master"
+ 
+ForEach ($SQLInstance in $SQLInstances.Split(","))
+{
+    echo "Running Scripts on " $SQLInstance
+ 
+    #get  manifest
+    $Manifest = (Invoke-WebRequest $GitManifestURL).Content
+ 
+    #loop through prereqs in order of the manifest and run them into SQL
+    #foreach ($PreRec In $Manifest)
+    ForEach ($Script in $Manifest.Split("`r`n"))
+    {
+        $ScriptURL = ($GitRepository + "/" + $Script)
+        echo "Running " $ScriptURL
+        $ScriptFromGit = Invoke-WebRequest $ScriptURL
+        Invoke-Sqlcmd -Query $ScriptFromGit.Content -ServerInstance $SQLInstance -database $DefaultDatabase
+ 
+    }
+}
+====================================================================
+
+
+
