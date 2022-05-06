@@ -1,0 +1,74 @@
+DB - Move database between drives
+
+--https://www.sqlserverblogforum.com/dba/move-database-between-drives/
+
+SQL server Move user database steps and scripts:
+
+Check you have a free space on the moving drive and make sure the SQL service account has read and write permission. 
+(You can check the account name in configuration manager)
+
+Move TempDB database
+====================
+--========================= for tempdb
+-- note the existing details with logical name
+
+--Step 1
+USE TempDB
+GO
+EXEC sp_helpfile
+tempdev 1   C:\Program Files\Microsoft SQL Server\MSSQL11.PROD\MSSQL\DATA\tempdb.mdf
+templog 2   C:\Program Files\Microsoft SQL Server\MSSQL11.PROD\MSSQL\DATA\templog.ldf
+
+--Step 2
+-- alter to new location
+USE master
+GO
+ALTER DATABASE TempDB MODIFY FILE
+(NAME = tempdev, FILENAME = 'T:\SQL_TEMPDB\tempdb.mdf')
+GO
+ALTER DATABASE TempDB MODIFY FILE
+(NAME = templog, FILENAME = 'T:\SQL_TEMPDB\templog.ldf')
+GO
+
+--Step 3
+-- restart to take a new path
+Restart the SQL service
+
+=====================================================================================
+-- Move User DBs ===================
+--------------------------------- note the existing details with logical name
+
+--Step 1
+select size/128.0 AS CurrentSizeMB,*
+from sys.master_files a join sys.databases b
+on a.database_id =b.database_id 
+--where a.physical_name like 'c%' 
+order by a.size/128.0 desc
+--OR
+sp_helpdb 'DBA_Test1'
+DBA_Test1   1   D:\Prod_Data\DBA_Test1.mdf
+DBA_Test1_log   2   D:\Prod_Data\DBA_Test1_log.ldf
+
+--Step 2
+-- change to new location for both mdf & ldf OR only LDF
+-- If you have more MDF and LDF for a single database, you have to do it for each
+use master
+ALTER DATABASE DBA_Test1
+MODIFY FILE (NAME = DBA_Test1, FILENAME = 'D:\SQLData\DBA_Test1.mdf');
+ALTER DATABASE DBA_Test1
+MODIFY FILE (NAME = DBA_Test1_log, FILENAME = 'L:\SQLLog\DBA_Test1_log.ldf');
+
+--Step 3
+-- single user
+ALTER DATABASE DBA_Test1 SET single_user with rollback immediate
+ALTER DATABASE DBA_Test1 SET OFFLINE
+
+--Step 4
+-- copy & paste the MDF & LDF files
+
+--Step 5
+ALTER DATABASE DBA_Test1 SET ONLINE
+ALTER DATABASE DBA_Test1 SET multi_user
+
+--Step 6
+-- Once all fine remove the old MDF & LDF
