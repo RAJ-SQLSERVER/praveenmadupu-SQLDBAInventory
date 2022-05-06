@@ -1,0 +1,48 @@
+Perm Tuning-find slow running T SQL query
+
+Source: https://www.sqlserverblogforum.com/performance/how-to-find-slow-running-t-sql-query/
+Top 10 ways to find slow running T SQL query
+
+Followings are ways to identity and capture the slow running queries in SQL server database.
+
+ 
+
+1.Use common activity monitor and task manager to get some overview
+
+Right click the instance – Activity monitor
+
+2.Use DMVs
+
+Use Glenn Berry’s DMV pack https://www.sqlskills.com/blogs/glenn/category/dmv-queries/
+
+3.Check wait stats
+
+Use Paul Randal’s DMV  https://www.sqlskills.com/blogs/paul/wait-statistics-or-please-tell-me-where-it-hurts/
+
+4.Use Whoisactive
+
+Use Adam Machanic’s script https://www.sqlserverblogforum.com/dba/whoisactive-capturing-a-sql-server-queries-performance-tuning/
+
+5.Use SP_BiltZ
+
+Use Brent Ozar’s script https://www.brentozar.com/blitz/
+
+6.Use server side trace
+
+https://www.sqlserverblogforum.com/dba/how-to-use-server-side-trace-to-capture-running-query-t-sql/
+
+7.Use extended events
+
+https://blog.sqlauthority.com/2010/03/29/sql-server-introduction-to-extended-events-finding-long-running-queries/
+
+8.Use actual execution plan, if you have query
+
+In SSMS, check mark the actual execution plan and run the query to tune further.
+
+9.Use query store, if SQL version is above 2016
+
+10.Use query store
+
+https://docs.microsoft.com/en-us/sql/relational-databases/performance/best-practice-with-the-query-store?view=sql- server-ver15
+
+For SQL azure PaaS use insight dashboard
