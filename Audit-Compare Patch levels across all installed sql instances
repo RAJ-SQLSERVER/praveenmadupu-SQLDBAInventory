@@ -1,0 +1,159 @@
+Audit-Compare Patch levels across all installed sql instances
+https://www.sqlservercentral.com/scripts/compare-patch-levels-across-all-installed-sql-instances
+
+Ever wondered if all nodes are on the same patch (or version) level?
+
+Is your failovers are taking longer than expected? Do you see tons of the lines in error logs saying upgrading or downgrading databases? Well, you can run SQL Server features discovery report on each server to compare sql versions or just run the script below.
+
+Preliminary steps:
+
+Replace DECLARE @ServerNameList NVARCHAR(1000) = '"Server01","Server02","Server03"' with real server names.
+You need to be sysadmin on servers above.
+Run the script from any 1 sql instance installed on these servers.
+Use vertical or horizontal output, I couldn’t decide which one is better.
+Sample output:
+
+DECLARE @Value sql_variant
+SELECT @Value = value_in_use FROM master.sys.configurations WHERE [name] = 'xp_cmdshell'
+
+IF @Value = 0
+BEGIN
+EXEC sp_configure 'xp_cmdshell', 1
+RECONFIGURE
+END
+
+
+DECLARE @ServerNameList NVARCHAR(1000) = '"Server01","Server02","Server03"'
+DECLARE @PowerShellFile NVARCHAR(300) = 'C:TempGet-PatchLevel.ps1'  -- local folder on sql instance
+DECLARE @PatchLevelFile NVARCHAR(100) = 'C:TempPatchLevel.txt'
+DECLARE @OLE            INT 
+DECLARE @FileID         INT
+DECLARE @Command        NVARCHAR(4000)
+DECLARE @SQLServerRegistryKeyPath VARCHAR (256), @SQLVersion VARCHAR (56), @InstanceName VARCHAR (56), @SQLPath VARCHAR (356)
+DECLARE @InstalledInstances  TABLE (InstanceName NVARCHAR(200))
+DECLARE @Instances  TABLE (MachineName sysname, InstanceName NVARCHAR(200), [Version] NVARCHAR(50))
+
+
+SET NOCOUNT ON;
+
+IF EXISTS(SELECT 1 from tempdb.sys.objects WHERE [name] like '#FileContents%')
+DROP TABLE #FileContents
+CREATE TABLE #FileContents (Instance nvarchar(200), [Server] nvarchar(200), [Version] nvarchar(200))
+
+EXEC ('xp_cmdshell ''del "' + @PatchLevelFile + '"'', no_output')
+
+EXEC ('xp_cmdshell ''del "' + @PowerShellFile + '"'', no_output')
+
+-- get all installed sql instances
+SET @Command = 'powershell.exe "Get-Service | Where-Object {$_.Name -like ''MSSQL$*''}"'
+INSERT INTO @InstalledInstances (InstanceName)
+EXEC xp_cmdshell @Command
+
+DELETE FROM @InstalledInstances WHERE InstanceName IS NULL OR CHARINDEX('SQL Server', InstanceName, 1) = 0
+
+UPDATE @InstalledInstances 
+SET InstanceName = RTRIM(LTRIM(SUBSTRING(InstanceName, CHARINDEX('(', InstanceName, 1) + 1, LEN(InstanceName) - CHARINDEX('(', InstanceName, 1) - 1)))
+
+DECLARE InstalledInstances CURSOR FOR
+SELECT InstanceName FROM @InstalledInstances
+
+OPEN InstalledInstances  
+
+FETCH NEXT FROM InstalledInstances INTO @InstanceName  
+
+WHILE @@FETCH_STATUS = 0  
+BEGIN
+SET @SQLServerRegistryKeyPath = N'SoftwareMicrosoftMicrosoft SQL Server' + @InstanceName + 'Setup'
+-- Get SQLPath for installed instance
+EXEC [master]..[xp_regread]  N'HKEY_LOCAL_MACHINE'
+,@SQLServerRegistryKeyPath
+,'SQLPath'
+,@SQLPath OUTPUT;
+
+SET @SQLPath = RIGHT(@SQLPath, LEN(@SQLPath) - CHARINDEX('MSSQL', @SQLPath, 1) + 1)
+SET @SQLPath = REPLACE(@SQLPath, 'MSSQL', '')
+SET @SQLServerRegistryKeyPath = N'SoftwareMicrosoftMicrosoft SQL Server' + @SQLPath + 'Setup'
+-- create PowerShell file
+SET @Command = '
+$ServerNameList = ' + @ServerNameList + '
+#IF the output folder does not exist then create it
+$OutputFolder = "c:Temp"
+$DoesFolderExist = Test-Path $OutputFolder
+$null = if (!$DoesFolderExist){MKDIR "$OutputFolder"}
+
+foreach($ServerName in $ServerNameList)
+{
+$Reg = [Microsoft.Win32.RegistryKey]::OpenRemoteBaseKey(''LocalMachine'',$ServerName)
+$RegKey = $Reg.OpenSubKey(''' + @SQLServerRegistryKeyPath + ''')
+$Value = $RegKey.GetValue(''PatchLevel'')
+''' + @InstanceName + ','' + $ServerName + '','' + $Value | out-file "' + @PatchLevelFile + '" -Append
+}'
+EXECUTE sp_OACreate 'Scripting.FileSystemObject', @OLE OUT 
+EXECUTE sp_OAMethod @OLE, 'OpenTextFile', @FileID OUT, @PowerShellFile, 8, 1 
+
+EXECUTE sp_OAMethod @FileID, 'WriteLine', Null, @Command
+
+EXECUTE sp_OADestroy @FileID 
+EXECUTE sp_OADestroy @OLE 
+
+SET @Command = 'powershell.exe -ExecutionPolicy Bypass -File "' + @PowerShellFile + '"'  
+
+EXEC xp_cmdshell @Command, no_output
+-- delete PowerShell file
+EXEC ('xp_cmdshell ''del "' + @PowerShellFile + '"'', no_output')
+FETCH NEXT FROM InstalledInstances INTO @InstanceName
+END   
+CLOSE InstalledInstances;  
+DEALLOCATE InstalledInstances;
+
+-- insert data from output PatchLevel file
+BULK INSERT #FileContents 
+FROM 'c:tempPatchLevel.txt'
+WITH 
+(DATAFILETYPE = 'widechar',  
+FIELDTERMINATOR = ',',  
+ROWTERMINATOR = 'n' 
+)
+
+SELECT DISTINCT @Command = STUFF( ( SELECT  ',' + InstanceName + ''
+FROM @InstalledInstances
+ORDER BY InstanceName FOR XML PATH('') ), 1,1,'')
+
+-- horizontal Pivot output
+SET @Command = '
+SELECT Server, ' + @Command + '
+FROM   
+(SELECT [Instance], Server, Version  
+FROM #FileContents) p  
+PIVOT  
+(  
+MAX(Version) 
+FOR Instance IN  
+(' + @Command + ')  
+) AS pvt  
+ORDER BY pvt.Server' 
+EXEC(@Command)
+
+-- vertical Pivot output
+SET @Command = REPLACE(@ServerNameList, '"', '')
+SET @Command = '
+SELECT [Instance], ' + @Command + '
+FROM   
+(SELECT [Instance], Server, Version  
+FROM #FileContents) p  
+PIVOT  
+(  
+MAX(Version) 
+FOR [Server] IN  
+(' + @Command + ')  
+) AS pvt  
+ORDER BY pvt.[Instance]'
+EXEC(@Command)
+
+-- Set it back
+IF @Value = 0
+BEGIN
+EXEC sp_configure 'xp_cmdshell', 0
+RECONFIGURE
+END
+GO
