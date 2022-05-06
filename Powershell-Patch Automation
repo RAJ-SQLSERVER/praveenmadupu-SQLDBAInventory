@@ -1,0 +1,160 @@
+Patch Update apply and automate SQL server patch for multiple servers patching compliance by DBATools Powershell
+
+https://www.sqlserverblogforum.com/powershell/patch-update-apply-and-automate-sql-server-patch-for-multiple-servers-patching-compliance-by-dbatools-powershell/
+
+blog post about automate patching.
+
+http://www.sqlnuggets.com/blog/patching-multiple-sql-servers-with-powershell-and-dbatools/
+
+https://claudioessilva.eu/2018/01/23/using-dbatools-to-verify-your-sql-server-instances-version-compliance/
+
+ 
+
+Pre requesting:
+
+The target remote server should have minimum PowerShell 3.0
+
+You should install or update DBATools module with latest version on your desktop or CMS
+
+If you have internet connection, you can directly install from gallery. If you do not have download the module and copy it just import it to PowerShell.
+
+https://dbatools.io/getting-started/
+
+https://dbatools.io/join-us/guidelines/
+
+https://dbatools.io/download/
+
+Install-Module dbatools –Force
+
+If you do not have internet into a server, copy and paste the zip files and import it. This is the most of the cases in the servers.
+
+Step 1: Open PowerShell run ‘$env:PSMODULEPATH’ to find the path and copy the folder any of this path
+
+Step 2: Copy the un zip folder and rename it to DBATools from dbatools-master to env:PSMODULEPATH path
+
+Step 3: Unblock the file
+
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass # digitally signed error
+
+Get-ChildItem -Recurse ‘C:\Users\Muthu\Documents\WindowsPowerShell\Modules\DBATools’ | unblock-File
+
+Step 4: Import the module to local PS
+
+Import-Module ‘C:\Users\Muthu\Documents\WindowsPowerShell\Modules\DBATools’
+
+PS C:\Users\Muthu> $env:PSMODULEPATH
+
+C:\Users\Muthu\Documents\WindowsPowerShell\Modules;C:\Program Files\WindowsPowerShell\Modules;C:\WINDOWS\system32\WindowsPowerShell\v1.0\Modules;C:\Program Files (x86)\Microsoft SQL Server\120\Tools\PowerShell\Modules\
+
+PS C:\Users\Muthu>
+
+How to find SQL server build version SP, CU and KB for multiple SQL servers that you managed. Get the results into a table or excel csv file.
+
+This is one of the cool script and way to find the patching compliance, when you have larger SQL server 200+.
+
+==============================================================================================================
+# 1. Change the patch and name of each run D:\Source\SQL_Patch\CU_info.html
+# 2. Change the query: Namelevel like '%2014%' & and P.servername not like '%server name%'
+# 3. Check the path, make sure the file is exists : $patch_path ="\\share\SQL Service Pack All versions\SQL2014\"
+# 4. Change the version name $version = '2014SP3'
+# 5. Make sure PS version on remote server is above 3.0 and remoting Enable-PSRemoting with port opened 5985
+
+#Method 1 - Get data from table and write results into different table
+#You should have a table which will have at least servername and version number
+#In this I used my automon table description, version_number
+Get-DbaBuildReference -Update
+$Instance = "servername"
+$Database = "DBName"
+$InstancesTable = "dbo.DBA_ALL_SERVERS"
+$SQLServersBuilds = Invoke-DbaQuery -SqlInstance $Instance -Database $Database -Query "SELECT description, version_number FROM $InstancesTable where SVR_status ='running'" #-SqlCredential 'domain\user'
+$Data = $SQLServersBuilds | ForEach-Object {
+    $build = $_.version_number.SubString(0, $_.version_number.LastIndexOf('.'))
+    $serverName = $_.description
+    Test-DbaBuild -Build $build  -MaxBehind "0CU" | Select-Object @{Name="ServerName";Expression={$serverName}}, *
+} #| export-csv -Path D:\Source\SQL_Patch\All_SP_CU_maxbehind_1_CU.csv -NoTypeInformation
+Write-DbaDbTableData -SqlInstance $Instance -InputObject $Data -table dbo.SQLPatch_05_april_2020 -database DBAdata -AutoCreateTable -Confirm
+ 
+
+# Method 2 - Load into a table set server from txt file
+
+$servers = get-content '\\Share\Powershell\Server.txt' | Test-DbaBuild  -MaxBehind "0CU"
+Write-DbaDbTableData -SqlInstance Localinstance -InputObject $servers -table dbo.SQLPatch_05_april_2020  -database DBAdata -AutoCreateTable -Confirm
+
+=======================================================================================================================
+
+How to update and automate SQL server patch for multiple servers by DBATools PowerShell
+
+In the following script, we can pass list of servers by directly typing or txt file or from table. I used my CMS table.
+
+Pass the windows account credential details and patching share patch location, better create a folder per version and store patch files and 
+grant everyone read and write access.
+
+You can patch version by version (OR) Dev, UAT & Live. 
+
+But, store patching software of all versions that you are patching it and the script will navigate the sub-folders \share\SQL_Patch.
+
+=======================================
+#Get-DbaBuildReference -MajorVersion 2016 -ServicePack 7 -Update # find the patch level
+
+#create a list of servers that you want to patch from table or directly or txt file
+#$ServerList = 'server1','server2'
+$ServerList = Invoke-DbaQuery -SqlInstance "servername" -Query "SELECT InstanceConnection FROM DBAdata.dbo.DBA_ALL_SERVERS where version ='2016'" | Select-Object -ExpandProperty InstanceConnection
+Get-DbaBuildReference   -SqlInstance $ServerList |ConvertTo-Html |out-file "D:\Source\SQL_Patch\CU_info.html"
+
+#$cred set credentail
+$cred = Get-Credential user@fqdn-domain.COM # if user fails, try using domain\username as well
+#$User = "user@fqdn-domain.COM"
+#$PWord = ConvertTo-SecureString -String 'pass' -AsPlainText -Force
+#$cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $User, $PWord
+# set path of patch file
+$patch_path ="\\share\SQL_Patch\2016\"
+
+#Set the version that you want to update to
+$version = '2016SP1CU15'
+
+#Start Patching! The -Restart option will allow it to restart the SQL Server as needed
+Update-DbaInstance -ComputerName $ServerList -Path $patch_path -Credential $cred -Version $version -Verbose -Restart #-Confirm:$false
+============================================
+This was really nice package and module given to the SQL community, it makes life easier.
+
+Common error we encounter. Check the PS version of remote server and enable remote, test new session.
+ 
+
+$PsSession = New-PSSession -ComputerName “your Instance” -UseSSL
+Invoke-Command -Session $PsSession -Script Block {dir}
+
+On remote server:
+
+winrm qc — (or winrm quickconfig). Or open an Administrator PowerShell prompt and run:
+
+Enable-PSRemoting
+
+Enter-PSSession -Computername localhost
+Enter-PSSession -Computername server name
+
+Check again:
+
+$PsSession = New-PSSession -ComputerName “your Instance” -UseSSL
+Invoke-Command -Session $PsSession -Script Block {dir}
+
+========
+
+New-PSSession : Connecting to remote server server name
+failed with the following error message : The client cannot connect to the destination specified in the request.
+Verify that the service on the destination is running and is accepting requests. Consult the logs and documentation
+for the WS-Management service running on the destination, most commonly IIS or WinRM. If the destination is the WinRM
+service, run the following command on the destination to analyze and configure the WinRM service: “winrm quickconfig”.
+For more information, see the about_Remote_Troubleshooting Help topic.
+At line:1 char:14
++ … PsSession = New-PSSession -ComputerName
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
++ CategoryInfo : OpenError: (System.Manageme….RemoteRunspace:RemoteRunspace) [New-PSSession], PSRemotin
+gTransportException
++ FullyQualifiedErrorId : CannotConnect,PSSessionOpenFailed
+PS C:\Windows\system32>
+
+Another error you might get.
+
+cannot find path – dbatools-buildref-index.json.
+
+Copy and paste the file from zip to the Appdata roaming folder.
