@@ -1,0 +1,824 @@
+SQL Server 2000 Health Check Script in CVS
+
+
+https://www.dbaservices.com.au/sql-server-2000-health-check-script-in-cvs/
+
+create procedure  sp_emailDailyHealthCheckCSV
+@charfrom varchar(50),
+@charsubject varchar(100),
+@charemailserver varchar(15),
+@intresults int OUTPUT
+AS
+/******************************************************************
+*
+* DAILY HEALTH CHECK SCRIPT - SQL Server
+*
+*
+******************************************************************/
+/*
+declare @rc int
+set @rc=0
+exec  sp_emailDailyHealthCheck
+@charfrom  = Ntest@test.com',
+@charemailserver  = N'188.188.1.13',
+@charsubject  = N'SQL Health Check Report: (Server: "DELL2500")',
+@intresults         = @rc
+CVS format
+COLLECTIONTYPE    as varchar , e.g. SQLSVR
+COLLECTIONSOURCE  as varchar,  e.g. DELL2500
+COLLECTIONDATETIME as varchar, e.g. Mar 6 2008 8:00AM
+COLLECTIONNAME  as varchar e.g. DISKSPACE
+COLLECTIONHEADER  as varchar e.g. USEDSPACE
+COLLECTIONVALUE1   as varchar e.g. C
+COLLECTIONVALUE2  as varchar e.g. 100 or 200
+*/
+/*****************************************
+* Create temp tables for storing the health check output
+*****************************************/
+declare  @COLLECTIONTYPE     varchar(20)
+declare  @COLLECTIONSOURCE   varchar(50)
+declare  @COLLECTIONDATETIME  varchar(20)
+set @COLLECTIONTYPE    = 'SQLSERVR'
+set @COLLECTIONSOURCE  = @@servername
+set @COLLECTIONDATETIME  = cast(getdate() as varchar)
+CREATE TABLE #csv_output (COLLECTIONTYPE   varchar(20), COLLECTIONSOURCE varchar(50),
+COLLECTIONDATETIME varchar(20), COLLECTIONNAME  varchar(50),
+COLLECTIONHEADER   varchar(50), COLLECTIONVALUE1 varchar(500),
+COLLECTIONVALUE2   varchar(500)  )
+insert into #csv_output values('COLLECTIONTYPE', 'COLLECTIONSOURCE', 'COLLECTIONDATETIME',
+'COLLECTIONNAME','COLLECTIONHEADER','COLLECTIONVALUE1','COLLECTIONVALUE2')
+insert into #csv_output values(@COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SQLVERSION','SQLVERSION',replace(replace(@@version,char(9),''),char(10),''),'')
+Declare @output varchar(1000)
+--- Get the ip address of the server
+CREATE TABLE #temp1(t varchar(3000) null)
+insert into #temp1 exec  xp_cmdshell 'ipconfig'
+DECLARE @t1 varchar(300)-- subject to localisation
+SET @t1 = (
+SELECT top 1 #temp1.t from #temp1
+where t like '%IP Address%'
+order by t DESC
+)
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'IPADRESS','IPADRESS',LTRIM(RTRIM(SUBSTRING(t,CHARINDEX(':',t)+1,len(@t1)))),''
+from #temp1
+where t like '%IP Address%'
+drop table #temp1
+-- end of getting ip address
+/******************************************************************
+*
+* Get Total Disk Space Availaible
+*
+* This script displays Drive and total sql size used and free size
+*
+*
+*****************************************************************/
+Begin
+Declare @a Varchar(50)
+,@b Varchar(50)
+,@c Varchar(50)
+,@TSize1 VARCHAR(255)
+Create Table #Ops_Drives
+(
+Drive Varchar(1),
+Size int
+)
+Declare @a1 int
+,@b1 int
+,@c1 int
+,@d1 int
+Create Table #Ops_DriveTmp
+(
+DBName Varchar(25)
+,Location Varchar(255)
+,Size Varchar(8)
+,MaxSize int
+,Growth Int
+,Device Varchar(30)
+)
+Exec SP_MSForEachDB
+'Use [?] Insert into #Ops_DriveTmp
+Select Upper(Convert(Varchar(25),DB_Name())) as ''Database'',
+Convert(Varchar(255),FileName),Convert(Varchar(8),Size/128)''Size in MB'',
+MaxSize,Growth,
+Convert(Varchar(30),Name)
+from SysFiles'
+Select @a1=Sum(Convert(Int,Size)) from #Ops_DriveTmp
+Insert Into #Ops_Drives
+Exec Master..XP_Fixeddrives
+Create Table #Ops_TmpDriveInfo
+(
+Drive Varchar(1),
+SQL Varchar(8),
+FreeSpace Varchar(255),
+TotalSpace varchar(255),
+Util  varchar(4)
+)
+DECLARE @oFSO1 INT,@oDrive1 INT,  @ret1 INT
+EXEC @ret1 = master.dbo.sp_OACreate 'scripting.FileSystemObject', @oFSO1 OUT
+Declare CheckDrives Cursor For Select Drive,size from #Ops_Drives Order by Drive
+Open CheckDrives
+Fetch Next from CheckDrives into @c,@c1
+While (@@Fetch_Status=0)
+Begin
+Select @b1=sum(convert(Int,Size))
+from #Ops_DriveTmp
+where substring(Location,1,1)=@c
+Set @a =@c + ':'
+EXEC @ret1 = master.dbo.sp_OAMethod @oFSO1, 'GetDrive', @oDrive1 OUT, @a
+EXEC @ret1 = master.dbo.sp_OAMethod @oDrive1, 'TotalSize', @TSize1 OUT
+set @d1 = CAST(ROUND((CAST(isnull(@TSize1,1) AS FLOAT) / 1024) /1024,0) AS INT)
+Insert into #Ops_TmpDriveInfo values(@c,isnull(@b1,0),@c1,@d1 ,
+(100 -(round(( @c1)/ ROUND((CAST(isnull(@TSize1,1) AS FLOAT) / 1024) /1024 ,0),3) * 100)) )
+Fetch Next from CheckDrives into @c,@c1
+End
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DISKSPACE','SQLSERVERDATA',Drive,[SQL]
+from #Ops_TmpDriveINFO
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DISKSPACE','FREESPACE',Drive,FreeSpace
+from #Ops_TmpDriveINFO
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DISKSPACE','TOTALSPACE',Drive,TotalSpace
+from #Ops_TmpDriveINFO
+drop table #Ops_TmpDriveINFO
+drop table #Ops_DriveTmp
+drop table #Ops_Drives
+exec @ret1 = sp_OADestroy @oFSO1
+exec @ret1 = sp_OADestroy @oDrive1
+Close CheckDrives
+Deallocate CheckDrives
+End
+/******************************************************************
+*
+* End Of Get Total Disk Space Availaible
+******************************************************************/
+/******************************************************************
+*
+* Get Summary Database Details
+*
+* This script displays Summary Database Details, % used
+*
+*
+*****************************************************************/
+SET nocount  ON
+DECLARE  @dbname SYSNAME
+CREATE TABLE #datafilestats (
+dbname       VARCHAR(200) null,
+flag         BIT DEFAULT 0 ,
+fileid       TINYINT,
+[filegroup]  TINYINT,
+totalextents DEC(20,1),
+usedextents  DEC(20,1),
+[name]       VARCHAR(200),
+[filename]   VARCHAR(200))
+DECLARE  @string SYSNAME
+SET @string = ''
+SET @dbname = ''
+WHILE 1 = 1
+BEGIN
+SELECT top 1  @dbname = name
+FROM   master..sysdatabases
+WHERE  name &gt; @dbname
+IF @@ROWCOUNT = 0
+BREAK
+IF NOT (SELECT Databasepropertyex(@dbname,'Status')) = 'ONLINE'
+BREAK
+SET @string = 'use [' + @dbname + '] DBCC SHOWFILESTATS with no_infomsgs'
+INSERT INTO #datafilestats
+(fileid,
+[filegroup],
+totalextents,
+usedextents,
+[name],
+[filename])
+EXEC( @string)
+UPDATE #datafilestats
+SET    dbname = @dbname,
+flag = 1
+WHERE  flag = 0
+UPDATE #datafilestats
+SET    totalextents = (SELECT SUM(totalextents) * 8 * 8192.0 / 1048576.0
+FROM   #datafilestats
+WHERE  dbname = @dbname)
+WHERE  flag = 1
+AND fileid = 1
+AND filegroup = 1
+AND dbname = @dbname
+UPDATE #datafilestats
+SET    usedextents = (SELECT SUM(usedextents) * 8 * 8192.0 / 1048576.0
+FROM   #datafilestats
+WHERE  dbname = @dbname)
+WHERE  flag = 1
+AND fileid = 1
+AND filegroup = 1
+AND dbname = @dbname
+END
+CREATE TABLE #sizeinfo (
+db_name         VARCHAR(200) NOT NULL PRIMARY KEY CLUSTERED,
+total           DEC(20,1) null,
+data            DEC(20,1) null,
+data_used       DEC(20,1) null,
+[data (%)]      DEC(20,1) null ,
+data_free       DEC(20,1) null,
+[data_free (%)] DEC(20,1) null,
+LOG             DEC(20,1) null,
+log_used        DEC(20,1) null,
+[log (%)]       DEC(20,1) null,
+log_free        DEC(20,1) null,
+[log_free (%)]  DEC(20,1) null,
+status          DEC(20,1))
+INSERT #sizeinfo
+(db_name,
+[log],
+[log (%)],
+status)
+EXEC( 'dbcc sqlperf(logspace) with no_infomsgs')
+UPDATE #sizeinfo
+SET    data = d.totalextents
+FROM   #datafilestats d
+JOIN #sizeinfo s
+ON d.dbname = s.db_name
+WHERE  d.flag = 1
+AND d.fileid = 1
+AND d.filegroup = 1
+UPDATE #sizeinfo
+SET    data_used = d.usedextents
+FROM   #datafilestats d
+JOIN #sizeinfo s
+ON d.dbname = s.db_name
+WHERE  d.flag = 1
+AND d.fileid = 1
+AND d.filegroup = 1
+UPDATE #sizeinfo
+SET    total = (data + LOG)
+UPDATE #sizeinfo
+SET    [data (%)] = (data_used * 100.0 / data)
+UPDATE #sizeinfo
+SET    data_free = (data - data_used)
+UPDATE #sizeinfo
+SET    [data_free (%)] = (100 - [data (%)])
+UPDATE #sizeinfo
+SET    log_used = (LOG * [log (%)] / 100.0)
+UPDATE #sizeinfo
+SET    log_free = (LOG - log_used)
+UPDATE #sizeinfo
+SET    [log_free (%)] = (log_free * 100.0 / LOG)
+BEGIN
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASESUMMARY','TOTALDATAUSED',db_name, cast(data_used as varchar)
+FROM     #sizeinfo WITH (nolock)
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASESUMMARY','TOTALDATAFREE',db_name, cast(data_free as varchar)
+FROM     #sizeinfo WITH (nolock)
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASESUMMARY','TOTALLOGUSED',db_name, cast(log_used as varchar)
+FROM     #sizeinfo WITH (nolock)
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASESUMMARY','TOTALLOGFREE',db_name,cast(log_free as varchar)
+FROM     #sizeinfo WITH (nolock)
+END
+DROP TABLE #datafilestats
+DROP TABLE #sizeinfo
+/******************************************************************
+*
+* End Of Summary Database Details
+*
+*****************************************************************/
+/******************************************************************
+*
+* SQL Server Disk Space Check
+*
+* This script displays database and file size, compared to total
+* and free disk space. It also displays the number of Kb that each
+* file will grow by on the next extend.
+*
+******************************************************************/
+BEGIN
+/*****************************************
+* Create temp tables for disk space info
+*****************************************/
+CREATE TABLE #space (dletter varchar(2) null, fspace int, tspace BIGINT null)
+CREATE TABLE #dbsize (dbname varchar(50), dbsize int, remarks varchar(255) null)
+CREATE TABLE #fdata ([name] VARCHAR(255), [filename] VARCHAR(255),
+[filegroup] VARCHAR(10) null, [size] VARCHAR(50),
+[maxsize] VARCHAR(50), growth VARCHAR(20), usage VARCHAR(20))
+CREATE TABLE #growth (dbname VARCHAR(50), fname VARCHAR(255), next_exp INT, gtype VARCHAR(2))
+/*****************************************
+* populate temp tables
+*****************************************/
+INSERT INTO #space (dletter, fspace) EXEC master.dbo.xp_fixeddrives
+INSERT INTO #dbsize EXEC master.dbo.sp_databases
+-- Create cursor for files
+DECLARE c_files CURSOR FOR
+SELECT RTRIM(af.fileid), RTRIM(af.[name]), RTRIM(af.[filename]),
+RTRIM(af.[size]), RTRIM(db.[name])
+FROM master.dbo.sysaltfiles af, master.dbo.sysdatabases db
+WHERE af.dbid = db.dbid AND db.version &lt;&gt; 0
+DECLARE @tfileid INT, @tname VARCHAR(255), @tfilename VARCHAR(255)
+DECLARE @tsize INT, @tdbname VARCHAR(50)
+DECLARE @SQL NVARCHAR(255)
+DECLARE @growth VARCHAR(20), @next_exp INT, @gtype VARCHAR(2)
+-- Open cursor
+OPEN c_files
+FETCH NEXT FROM c_files
+INTO @tfileid, @tname, @tfilename, @tsize, @tdbname
+-- Populate #growth table with file growth details
+WHILE @@fetch_status = 0
+BEGIN
+TRUNCATE TABLE #fdata
+-- Get file data
+SET @SQL = 'INSERT INTO #fdata EXEC '
+SET @SQL = @SQL + @tdbname + '.dbo.sp_helpfile ''' + @tname + ''''
+EXEC sp_executesql @SQL
+SELECT @growth = growth FROM #fdata
+-- Determine if growth is % or Mbytes
+IF RIGHT(@growth,1) = '%'
+BEGIN
+SET @next_exp = CAST(LEFT(@growth, LEN(@growth) - 1) AS INT)
+SET @next_exp = CAST(ROUND(((CAST(@tsize AS FLOAT) * 8) / 100) * @next_exp,0) AS INT)
+SET @gtype = '%'
+END
+ELSE
+BEGIN
+SET @next_exp = CAST(LEFT(@growth, CHARINDEX(' ',@growth)) AS INT)
+SET @gtype = 'MB'
+END
+-- Create record for file in #growth table
+INSERT INTO #growth VALUES (@tdbname, @tname, @next_exp, @gtype)
+FETCH NEXT FROM c_files
+INTO @tfileid, @tname, @tfilename, @tsize, @tdbname
+END
+-- Close cursor
+CLOSE c_files
+DEALLOCATE c_files
+/*****************************************
+* Update temp table info with total disk sizes
+*****************************************/
+-- Create cursor for disk space table
+DECLARE c_disks CURSOR FOR
+SELECT dletter, fspace, tspace FROM #space
+FOR UPDATE
+DECLARE @dletter VARCHAR(2), @fspace INT, @tspace BIGINT
+-- Create FileSystemObject
+DECLARE @oFSO INT, @oDrive INT, @drsize VARCHAR(255), @ret INT
+EXEC @ret = master.dbo.sp_OACreate 'scripting.FileSystemObject', @oFSO OUT
+-- Open cursor and fetch first row
+OPEN c_disks
+FETCH NEXT FROM c_disks
+INTO @dletter, @fspace, @tspace
+-- Loop through all records in the cursor
+WHILE @@fetch_status = 0
+BEGIN
+-- Get disk size
+SET @dletter = @dletter + ':'
+EXEC @ret = master.dbo.sp_OAMethod @oFSO, 'GetDrive', @oDrive OUT, @dletter
+EXEC @ret = master.dbo.sp_OAMethod @oDrive, 'TotalSize', @drsize OUT
+-- Update table
+UPDATE #space
+SET tspace = CAST(@drsize AS BIGINT)
+WHERE CURRENT OF c_disks
+-- Destory oDrive
+EXEC master.dbo.sp_OADestroy @oDrive
+-- Fetch next row
+FETCH NEXT FROM c_disks
+INTO @dletter, @fspace, @tspace
+END
+-- Close cursor
+CLOSE c_disks
+DEALLOCATE c_disks
+-- Destroy FSO
+EXEC master.dbo.sp_OADestroy @oFSO
+/*****************************************
+* Return disk space info
+*****************************************/
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASEDETAIL','DATABASEFILENAME',db.[name],af.[name]
+FROM master.dbo.sysaltfiles af, #space s, #dbsize ds,
+master.dbo.sysdatabases db, #growth g
+WHERE s.dletter = LEFT(af.[filename],1)
+AND af.dbid = db.dbid
+AND db.[name] = ds.dbname
+AND g.dbname = db.[name]
+AND g.fname = af.[name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASEDETAIL','DATABASEFILEPATH',af.[name], af.[filename]
+FROM master.dbo.sysaltfiles af, #space s, #dbsize ds,
+master.dbo.sysdatabases db, #growth g
+WHERE s.dletter = LEFT(af.[filename],1)
+AND af.dbid = db.dbid
+AND db.[name] = ds.dbname
+AND g.dbname = db.[name]
+AND g.fname = af.[name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASEDETAIL','DATABASEFILESIZE',af.[name], CAST(ROUND((CAST(af.[size] AS FLOAT) * 8) / 1024,0) AS varchar)
+FROM master.dbo.sysaltfiles af, #space s, #dbsize ds,
+master.dbo.sysdatabases db, #growth g
+WHERE s.dletter = LEFT(af.[filename],1)
+AND af.dbid = db.dbid
+AND db.[name] = ds.dbname
+AND g.dbname = db.[name]
+AND g.fname = af.[name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASEDETAIL','DATABASEFILENEXTEXTENSIONSIZE',af.[name], STR(g.next_exp)
+FROM master.dbo.sysaltfiles af, #space s, #dbsize ds,
+master.dbo.sysdatabases db, #growth g
+WHERE s.dletter = LEFT(af.[filename],1)
+AND af.dbid = db.dbid
+AND db.[name] = ds.dbname
+AND g.dbname = db.[name]
+AND g.fname = af.[name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'DATABASEDETAIL','DATABASEFILENEXTEXPANSIONSIZE',af.[name], CAST(ROUND(CAST(g.next_exp AS FLOAT) / 1024,0) AS varchar)
+FROM master.dbo.sysaltfiles af, #space s, #dbsize ds,
+master.dbo.sysdatabases db, #growth g
+WHERE s.dletter = LEFT(af.[filename],1)
+AND af.dbid = db.dbid
+AND db.[name] = ds.dbname
+AND g.dbname = db.[name]
+AND g.fname = af.[name]
+/*****************************************
+* Drop temporary tables
+*****************************************/
+DROP TABLE #space
+DROP TABLE #dbsize
+DROP TABLE #fdata
+DROP TABLE #growth
+END
+/******************************************************************
+*
+* End Of SQL Server Disk Space Check
+******************************************************************/
+/******************************************************************
+*
+*Check for Last Backup Done.
+******************************************************************/
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'BACKUPDETAIL','DATABASELASTBACKUP', B.name ,ISNULL(Convert(char(10), MAX(backup_finish_date), 101), 'NEVER')
+FROM master.dbo.sysdatabases B LEFT OUTER JOIN msdb.dbo.backupset A
+ON A.database_name = B.name AND A.type = 'D' GROUP BY B.Name
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'BACKUPDETAIL','DAYSSINCELASTBACKUP', B.name ,ISNULL(STR(ABS(DATEDIFF(day, GetDate(), MAX(Backup_finish_date)))), 'NEVER')
+FROM master.dbo.sysdatabases B LEFT OUTER JOIN msdb.dbo.backupset A
+ON A.database_name = B.name AND A.type = 'D' GROUP BY B.Name
+/******************************************************************
+*
+* End Of SQL Server Disk Space Check
+******************************************************************/
+/******************************************************************
+*
+* Lists user and permission
+******************************************************************/
+-- ***************************************************************************
+-- Declare local variables
+DECLARE @DBName1 VARCHAR(32);
+DECLARE @SQLCmd VARCHAR(1024);
+-- ***************************************************************************
+-- ***************************************************************************
+-- Get the SQL Server logins
+-- Create Temp User table
+CREATE TABLE #Users1 (
+[sid] varbinary(85) NULL,
+[Login Name] varchar(24) NULL,
+[Default Database] varchar(18) NULL,
+[Login Type] varchar(9),
+[AD Login Type] varchar(8),
+[sysadmin] varchar(3),
+[securityadmin] varchar(3),
+[serveradmin] varchar(3),
+[setupadmin] varchar(3),
+[processadmin] varchar(3),
+[diskadmin] varchar(3),
+[dbcreator] varchar(3),
+[bulkadmin] varchar(3));
+---------------------------------------------------------
+INSERT INTO #Users1 SELECT sid,
+loginname AS [Login Name],
+dbname AS [Default Database],
+CASE isntname
+WHEN 1 THEN 'AD Login'
+ELSE 'SQL Login'
+END AS [Login Type],
+CASE
+WHEN isntgroup = 1 THEN 'AD Group'
+WHEN isntuser = 1 THEN 'AD User'
+ELSE ''
+END AS [AD Login Type],
+CASE sysadmin
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [sysadmin],
+CASE [securityadmin]
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [securityadmin],
+CASE [serveradmin]
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [serveradmin],
+CASE [setupadmin]
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [setupadmin],
+CASE [processadmin]
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [processadmin],
+CASE [diskadmin]
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [diskadmin],
+CASE [dbcreator]
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [dbcreator],
+CASE [bulkadmin]
+WHEN 1 THEN 'Yes'
+ELSE 'No'
+END AS [bulkadmin]
+FROM master.dbo.syslogins
+Where sysadmin =1 or  securityadmin =1 or  serveradmin =1 or setupadmin=1 or processadmin = 1
+or diskadmin=1 or dbcreator =1  or bulkadmin=1;
+---------------------------------------------------------
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERROLES','SYSADMIN', [Login Name],[sysadmin]
+FROM #Users1
+ORDER BY [Login Type], [AD Login Type], [Login Name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERROLES','SECURITYADMIN', [Login Name], [securityadmin]
+FROM #Users1
+ORDER BY [Login Type], [AD Login Type], [Login Name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERROLES','SERVERADMIN', [Login Name], [serveradmin]
+FROM #Users1
+ORDER BY [Login Type], [AD Login Type], [Login Name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERROLES','SETUPADMIN', [Login Name], [setupadmin]
+FROM #Users1
+ORDER BY [Login Type], [AD Login Type], [Login Name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERROLES','PROCESSADMIN', [Login Name], [processadmin]
+FROM #Users1
+ORDER BY [Login Type], [AD Login Type], [Login Name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERROLES','DISKADMIN', [Login Name], [diskadmin]
+FROM #Users1
+ORDER BY [Login Type], [AD Login Type], [Login Name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERROLES','DBCREATOR', [Login Name], [dbcreator]
+FROM #Users1
+ORDER BY [Login Type], [AD Login Type], [Login Name]
+insert into #csv_output
+select @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERROLES','BULKADMIN', [Login Name], [bulkadmin]
+FROM #Users1
+ORDER BY [Login Type], [AD Login Type], [Login Name]
+-- ***************************************************************************
+-- ***************************************************************************
+-- ***************************************************************************
+-- Create the output table for the Database User ID's
+CREATE TABLE ##DBUsers1 (
+[Database]          VARCHAR(64),
+[Database User ID]  VARCHAR(64),
+[Server Login]      VARCHAR(64),
+[Database Role]     VARCHAR(64))
+-- ***************************************************************************
+-- Declare a cursor to loop through all the databases on the server
+DECLARE csrDB CURSOR FOR
+SELECT name
+FROM master..sysdatabases
+WHERE name NOT IN ('master', 'model', 'msdb', 'tempdb');
+-- ***************************************************************************
+-- ***************************************************************************
+-- Open the cursor and get the first database name
+OPEN csrDB
+FETCH NEXT
+FROM csrDB
+INTO @DBName1
+-- ***************************************************************************
+-- ***************************************************************************
+-- Loop through the cursor
+WHILE @@FETCH_STATUS = 0
+BEGIN
+-- ***************************************************************************
+-- ***************************************************************************
+--
+SELECT @SQLCmd = 'INSERT ##DBUsers1 ' +
+'  SELECT ''' + @DBName1 + ''' AS [Database],' +
+'       su.[name] AS [Database User ID], ' +
+'       COALESCE (u.LoginName, ''** Orphaned **'') AS [Server Login], ' +
+'       COALESCE (sug.name, ''Public'') AS [Database Role] ' +
+'    FROM [' + @DBName1 + '].[dbo].[sysusers] su' +
+'        LEFT OUTER JOIN master.dbo.syslogins u' +
+'            ON su.sid = u.sid' +
+'        LEFT OUTER JOIN ([' + @DBName1 + '].[dbo].[sysmembers] sm ' +
+'                             INNER JOIN [' + @DBName1 + '].[dbo].[sysusers] sug  ' +
+'                                 ON sm.groupuid = sug.uid)' +
+'            ON su.uid = sm.memberuid ' +
+'    WHERE su.hasdbaccess = 1' +
+'      AND su.[name] != ''dbo''  AND u.LoginName is  null '
+EXEC (@SQLCmd)
+-- ***************************************************************************
+-- ***************************************************************************
+-- Get the next database name
+FETCH NEXT
+FROM csrDB
+INTO @DBName1
+-- ***************************************************************************
+-- ***************************************************************************
+-- End of the cursor loop
+END
+-- ***************************************************************************
+-- ***************************************************************************
+-- Close and deallocate the CURSOR
+CLOSE csrDB
+DEALLOCATE csrDB
+-- ***************************************************************************
+-- ***************************************************************************
+insert into #csv_output
+select distinct @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'ORPHANUSER','ORPHANUSER', [Database User ID], [Database]
+FROM ##DBUsers1
+ORDER BY [Database User ID],[Database];
+-- ***************************************************************************
+-- ***************************************************************************
+DROP TABLE #Users1;
+DROP TABLE ##DBUsers1;
+-- ***************************************************************************
+/******************************************************************
+*
+*  End of Lists user and permission
+*
+******************************************************************/
+/******************************************************************
+*
+*  Failed Scheduled alert jobs logs
+*
+******************************************************************/
+insert into #csv_output
+select distinct @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'FAILEDSCHEDULEDJOBS', 'FAILEDSCHEDULEDJOBS',j.name ,cast(DATEADD
+(  SECOND, jh.run_duration, CAST
+(CONVERT(VARCHAR, jh.run_date)
++ ' ' + STUFF(STUFF(RIGHT('000000'
++ CONVERT(VARCHAR,jh.run_time),6),5,0,':'),3,0,':')
+AS DATETIME
+) ) as varchar)
+FROM
+msdb..sysjobhistory jh
+INNER JOIN
+msdb..sysjobs j
+ON
+j.job_id = jh.job_id
+WHERE
+jh.step_name = '(Job outcome)'
+and jh.run_date &gt;= cast(year(getdate() - 1)as varchar) + right('0'+ cast(month(getdate() -1 )as varchar),2) + right('0'+ cast(day(getdate() -1) as varchar),2)
+and jh.run_status =0 -- failure
+/******************************************************************
+*
+* End Of SQL Server Disk Space Check
+******************************************************************/
+/******************************************************************
+*
+* Lists out the Last 20 Sql error logs with filtering on unimportant mesg
+*
+******************************************************************/
+CREATE TABLE #Errors (vchMessage varchar(500), ID int)
+CREATE INDEX idx_msg ON #Errors(ID, vchMessage)
+INSERT #Errors EXEC sp_readerrorlog
+--This will remove the header from the errolog
+SET ROWCOUNT 4
+DELETE #Errors
+SET ROWCOUNT 20
+insert into #csv_output
+select   @COLLECTIONTYPE, @COLLECTIONSOURCE, @COLLECTIONDATETIME,
+'SERVERLOGS','LAST20SERVERLOGS', vchMessage, ''
+FROM #Errors
+WHERE  vchMessage NOT LIKE '%Copyright (c)%'
+AND  (isdate(substring(vchMessage,1,10)) = 1)
+AND  substring(vchMessage,1,10) &gt; convert(varchar(10),(dateadd(dd,-1,getdate()-1)),120)
+ORDER BY ID DESC
+DROP TABLE #Errors
+SET ROWCOUNT 0
+/******************************************************************
+*
+*End of Lists out the Last 20 Sql error logs with filtering on unimportant mesg
+*
+******************************************************************/
+/******************************************************************
+*
+*  Writing the script output to csv file
+*
+******************************************************************/
+DECLARE  @objFileSystem int
+,@objTextStream int,
+@objErrorObject int,
+@strErrorMessage Varchar(1000),
+@Command varchar(1000),
+@hr int,
+@fileAndPath varchar(80),
+@objFile int
+set nocount on
+select @strErrorMessage='opening the File System Object'
+EXECUTE @hr = sp_OACreate  'Scripting.FileSystemObject' , @objFileSystem OUT
+Declare @Filename varchar(60)
+--set @Filename =   'DailyHealthcheck_' +  REPLACE(CONVERT(VARCHAR(10), GETDATE(), 103), '/', '') + '.html'
+set @Filename = 'c:tempDailyHealthcheck'
+Select @FileAndPath=@filename + '.csv'
+if @HR=0 Select @objErrorObject=@objFileSystem , @strErrorMessage='Creating file "'+@FileAndPath+'"'
+if @HR=0 execute @hr = sp_OAMethod   @objFileSystem   , 'CreateTextFile'
+, @objTextStream OUT, @FileAndPath,1,True
+if @HR=0 Select @objErrorObject=@objTextStream,
+@strErrorMessage='writing to the file "'+@FileAndPath+'"'
+Declare  msgcursor CURSOR FOR
+select Replace(COLLECTIONTYPE + ',' + COLLECTIONSOURCE + ',' +
+COLLECTIONDATETIME + ',' + COLLECTIONNAME  + ',' +
+COLLECTIONHEADER  + ',' + COLLECTIONVALUE1 + ',' +
+COLLECTIONVALUE2,char(13),'')    as msg from #csv_output
+Declare @String1 varchar(4000)
+Open  msgcursor
+fetch next from msgcursor
+into @String1
+-- Loop through all records in the cursor
+WHILE @@fetch_status = 0
+BEGIN
+if @HR=0 execute @hr = sp_OAMethod  @objTextStream, 'WriteLine', Null, @String1
+fetch next from msgcursor
+into @String1
+END
+Close msgcursor
+Deallocate msgcursor
+if @HR=0 Select @objErrorObject=@objTextStream, @strErrorMessage='closing the file "'+@FileAndPath+'"'
+if @HR=0 execute @hr = sp_OAMethod  @objTextStream, 'Close'
+if @hr&lt;&gt;0
+begin
+Declare
+@Source varchar(255),
+@Description Varchar(255),
+@Helpfile Varchar(255),
+@HelpID int
+EXECUTE sp_OAGetErrorInfo  @objErrorObject,
+@source output,@Description output,@Helpfile output,@HelpID output
+Select @strErrorMessage='Error whilst '
++coalesce(@strErrorMessage,'doing something')
++', '+coalesce(@Description,'')
+raiserror (@strErrorMessage,16,1)
+end
+EXECUTE  sp_OADestroy @objTextStream
+EXECUTE sp_OADestroy @objTextStream
+drop table #csv_output
+/******************************************************************
+*
+* End Of Writing the script output to csv file
+******************************************************************/
+/******************************************************************
+*
+* Compressing the report
+******************************************************************/
+declare @SQLCommand varchar(200)
+SET @SQLCommand = 'exec master..xp_cmdshell ' + '''' + 'makecab ' + @Filename  + '.csv  ' + @Filename + '.cab'''
+EXEC (@SQLCommand)
+/******************************************************************
+*
+* Compressing the report
+******************************************************************/
+/******************************************************************
+*
+* Sending the health check report to email
+******************************************************************/
+set @Filename = @Filename + '.cab'
+declare @rc int
+exec @rc = master.dbo.xp_smtp_sendmail
+@from  = @charfrom,
+@to   = N'xxx@mail.com',
+@server   = @charemailserver,
+@subject  = @charsubject   ,
+@attachment  = @Filename ,
+@message  = N'See Attached report '
+/******************************************************************
+*
+* End Of Sending the health check report to email
+******************************************************************/
+GO
