@@ -1,0 +1,1038 @@
+SQL Server 2012 Daily Health Check
+
+https://www.sherbaz.com/sql-server-2012-daily-health-check/
+
+Being a DBA, it is good to have some kind of automated health check report that gets delivered to inbox with quick glance of DB health. 
+Hence this script will be very useful. Copy this script and schedule as a SQL agent job. 
+Provide the mail profile and recipient addresses. 
+The script was built with help from several colleagues and references from different SQL forums.
+
+===============================================================================================================
+
+DECLARE @ServerIP VARCHAR(100), -- SQL Server 2005 Database Server IP Address
+ @Project VARCHAR(100), -- Name of project or cleint 
+ @Recepients VARCHAR(2000), -- Recepient(s) of this email (; separated in case of multiple recepients).
+@MailProfile VARCHAR(100), -- Mail profile name which exists on the target database server
+@Owner VARCHAR(200) -- Owner, basically name/email of the DBA responsible for the server
+
+SET @ServerIP = '.' -- SQL Server 2012 Database Server IP Address
+ set @Project = 'TimeWaste' -- Name of project or cleint 
+ set @Recepients = 'smohamed@sherbaz.com' -- Recepient(s) of this email (; separated in case of multiple recepients).
+set @MailProfile = 'DBA_Auto_Mail' -- Mail profile name which exists on the target database server
+set @Owner = 'Sherbaz'
+
+/*
+
+exec SQLServerHealth @@servername,  'MYProject', 'smohamed@sherbaz.com', 'SQLMail', 'Sherbaz'
+select * from msdb..sysmail_profile
+
+*/
+
+SET NOCOUNT ON
+
+/* Drop all the temp tables(not necessary at all as local temp tables get dropped as soon as session is released, 
+however, good to follow this practice). */
+
+If exists (select * from tempdb.sys.all_objects where name like '#jobs_status%' )
+BEGIN    
+      DROP TABLE #jobs_status    
+END    
+
+If exists (select * from tempdb.sys.all_objects where name like '#diskspace%' )
+BEGIN    
+      DROP TABLE #diskspace
+END    
+
+If exists (select * from tempdb.sys.all_objects where name like '#url%' )
+BEGIN    
+      DROP TABLE #url
+END    
+
+If exists (select * from tempdb.sys.all_objects where name like '#dirpaths%' )
+BEGIN    
+      DROP TABLE #dirpaths
+END    
+
+-- Create the temp tables which will be used to hold the data. 
+CREATE TABLE #url
+(
+      idd INT IDENTITY (1,1), 
+      url VARCHAR(1000)
+)
+
+CREATE TABLE #dirpaths 
+(
+      files VARCHAR(2000)
+)
+
+--CREATE TABLE #diskspace
+--(
+--      drive VARCHAR(200), 
+--      diskspace INT
+--)
+
+
+-- This table will hold data from sp_help_job (System sp in MSDB database)
+/*
+CREATE TABLE #jobs_status    
+(    
+      job_id UNIQUEIDENTIFIER,    
+      originating_server NVARCHAR(30),    
+      name SYSNAME,    
+      enabled TINYINT,    
+      description NVARCHAR(512),    
+      start_step_id INT,    
+      category SYSNAME,    
+      owner SYSNAME,    
+      notify_level_eventlog INT,    
+      notify_level_email INT,    
+      notify_level_netsend INT,    
+      notify_level_page INT,    
+      notify_email_operator SYSNAME,    
+      notify_netsend_operator SYSNAME,    
+      notify_page_operator SYSNAME,    
+      delete_level INT,    
+      date_created DATETIME,    
+      date_modified DATETIME,    
+      version_number INT,    
+      last_run_date INT,    
+      last_run_time INT,    
+      last_run_outcome INT,    
+      next_run_date INT,    
+      next_run_time INT,    
+      next_run_schedule_id INT,    
+      current_execution_status INT,    
+      current_execution_step SYSNAME,    
+      current_retry_attempt INT,    
+      has_step INT,    
+      has_schedule INT,    
+      has_target INT,    
+      type INT    
+)    
+*/
+
+-- To insert data in couple of temp tables created above.
+-- INSERT #diskspace(drive, diskspace) EXEC xp_fixeddrives
+SELECT DISTINCT dovs.volume_mount_point AS Drive,
+CONVERT(decimal,dovs.available_bytes/1048576/1024) AS FreeSpaceInGB,
+convert(decimal,dovs.total_bytes/1048576/1024) as TotalSpaceInGB,
+cast(CONVERT(decimal,dovs.available_bytes/1048576/1024)/convert(decimal,dovs.total_bytes/1048576/1024)*100 as decimal(38,2)) as FreeSpaceInPct
+into #diskspace
+FROM sys.master_files mf
+CROSS APPLY sys.dm_os_volume_stats(mf.database_id, mf.FILE_ID) dovs
+ORDER BY FreeSpaceInGB ASC
+
+-- INSERT #jobs_status EXEC msdb.dbo.sp_help_job  
+
+--select sj.job_id, sj.name, sc.name as Category, sj.Enabled, sjs.last_run_outcome,
+--        (select max(run_date) from msdb..sysjobhistory sjh where sjh.job_id = sj.job_id) as last_run_date
+--into #jobs_status
+--from msdb..sysjobs sj
+--join msdb..syscategories sc
+--        on sj.category_id = sc.category_id
+--join msdb.dbo.sysjobservers sjs
+--        on sjs.job_id = sj.job_id
+
+select sj.job_id, sj.name, sc.name as Category, sj.Enabled, sjs.last_run_outcome,
+        (SELECT top 1 endTime = CONVERT 
+     ( DATETIME, RTRIM(run_date)) + (  run_time * 9 + run_time % 10000 * 6 + run_time % 100 * 10 + 25 * run_duration) / 216e4 
+FROM msdb..sysjobhistory sjh where sjh.job_id = sj.job_id order by run_date desc, run_time desc) as last_run_date
+into #jobs_status
+from msdb..sysjobs sj
+join msdb..syscategories sc
+        on sj.category_id = sc.category_id
+join msdb.dbo.sysjobservers sjs
+        on sjs.job_id = sj.job_id
+
+-- Variable declaration   
+DECLARE @TableHTML  VARCHAR(MAX),    
+            @StrSubject VARCHAR(100),    
+            @Oriserver VARCHAR(100),
+            @Version VARCHAR(250),
+            @Edition VARCHAR(100),
+            @ISClustered VARCHAR(100),
+            @SP VARCHAR(100),
+            @ServerCollation VARCHAR(100),
+            @SingleUser VARCHAR(5),
+            @LicenseType VARCHAR(100),
+            @StartDate DATETIME,
+            @EndDate DATETIME,
+            @Cnt int,
+            @URL varchar(1000),
+            @Str varchar(1000)
+            
+-- Variable Assignment
+SELECT @Version = @@version
+SELECT @Edition = CONVERT(VARCHAR(100), serverproperty('Edition'))
+--SELECT @StartDate = CAST(CONVERT(VARCHAR(4), DATEPART(yyyy, GETDATE())) + '-' + CONVERT(VARCHAR(2), DATEPART(mm, GETDATE())) + '-01' AS DATETIME)
+-- SELECT @StartDate = @StartDate - 1
+SELECT @StartDate = getdate()-1
+SELECT @EndDate = CAST(CONVERT(VARCHAR(5),DATEPART(yyyy, GETDATE() + 1)) + '-' + CONVERT(VARCHAR(2),DATEPART(mm, GETDATE() + 1)) + '-' + CONVERT(VARCHAR(2), DATEPART(dd, GETDATE() + 1)) AS DATETIME)  
+SET @Cnt = 0
+
+IF serverproperty('IsClustered') = 0 
+BEGIN
+      SELECT @ISClustered = 'No'
+END
+ELSE
+BEGIN
+      SELECT @ISClustered = 'YES'
+END
+
+SELECT @SP = CONVERT(VARCHAR(100), SERVERPROPERTY ('productlevel'))
+SELECT @ServerCollation = CONVERT(VARCHAR(100), SERVERPROPERTY ('Collation')) 
+SELECT @LicenseType = CONVERT(VARCHAR(100), SERVERPROPERTY ('LicenseType')) 
+SELECT @SingleUser = CASE SERVERPROPERTY ('IsSingleUser')
+                                    WHEN 1 THEN 'Yes'
+                                    WHEN 0 THEN 'No'
+                                    ELSE
+                                    'null' END
+SELECT @OriServer = CONVERT(VARCHAR(50), SERVERPROPERTY('computernamephysicalnetbios'))  
+SELECT @strSubject = 'Production DB Server Daily Health SunRise Report ('+ CONVERT(VARCHAR(50), SERVERPROPERTY('servername')) + ')'    
+  
+/*
+Along with refrences to SQL Server System objects, You will also see lots of HTML code however do not worry, 
+Even though I am a primarily a SQL Server DBA, I am little fond of HTML, 
+so thought to show some of my HTML skills here :), trust me you would love to see the end product....
+*/
+SET @TableHTML =    
+      '<font face="Verdana" size="4">Server Info</font>  
+      <table border="1" cellpadding="0" cellspacing="0" style="border-collapse: collapse" bordercolor="#111111" id="AutoNumber1">  
+      <tr>  
+      <td bgcolor="#000080"><b>  
+      <font face="Verdana" size="2" color="#FFFFFF">Server Name</font></b></td>
+    <td bgcolor="#000080"><b>  
+      <font face="Verdana" size="2" color="#FFFFFF">Instance Name</font></b></td>
+    <td bgcolor="#000080"><b>  
+      <font face="Verdana" size="2" color="#FFFFFF">Edition</font></b></td>
+    <td width="60%" bgcolor="#000080"><b>  
+      <font face="Verdana" size="2" color="#FFFFFF">Version</font></b></td>
+    <td bgcolor="#000080"><b>  
+      <font face="Verdana" size="2" color="#FFFFFF">IsClustered</font></b></td>
+      </tr>  
+      <tr>  
+      <td><font face="Verdana" size="2">' + @OriServer +'</font></td>
+    <td><font face="Verdana" size="2">' + @@servername +'</font></td>
+    <td><font face="Verdana" size="2">' + @edition +'</font></td>
+    <td><font face="Verdana" size="2">' + @version +'</font></td>
+    <td><font face="Verdana" size="2">' + @isclustered +'</font></td>
+      </tr>  
+      </table>'
+
+
+SELECT 
+      @TableHTML =  @TableHTML + 
+      '<p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Disk Stats</font>
+      <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="50%" border="1">
+        <tr>
+            <td bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">Drive</font></b></td>
+            <td bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">Free Space (GB)</font></b></td>
+      <td bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">Total Space (GB)</font></b></td>
+      <td bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">Free Space (%)</font></b></td>
+        </tr>'
+
+SELECT 
+      @TableHTML =  @TableHTML +
+      '<tr><td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), drive), '') +'</font></td>' +    
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), FreeSpaceInGB), '') +'</font></td>' + 
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), TotalSpaceInGB), '') +'</font></td>' + 
+      '<td'+case when FreeSpaceInPct < 15.00 then ' style="background-color:#F00;"' else ' style="background-color:#0F0;"' end +'><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), FreeSpaceInPct), '') +'</font></td></tr>' 
+FROM 
+      #diskspace
+SELECT @TableHTML =  @TableHTML + '</table>'
+
+
+--========================---CPU stats
+If exists (select * from tempdb.sys.all_objects where name like '#cpu_usage%' )
+drop table #cpu_usage
+
+declare @ts_now bigint 
+select @ts_now = ms_ticks from sys.dm_os_sys_info 
+select dateadd (ms, (y.[timestamp] -@ts_now), GETDATE()) as EventTime,SQLProcessUtilization,SystemIdle, 100 - SystemIdle - SQLProcessUtilization as OtherProcessUtilization 
+into #cpu_usage
+ from ( select record.value('(./Record/@id)[1]', 'int') as record_id,  
+record.value('(./Record/SchedulerMonitorEvent/SystemHealth/SystemIdle)[1]', 'int') 
+ as SystemIdle, record.value('(./Record/SchedulerMonitorEvent/SystemHealth/ProcessUtilization)[1]', 
+ 'int') as SQLProcessUtilization, 
+timestamp from ( select timestamp, convert(xml, record) as record from sys.dm_os_ring_buffers 
+where ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR' 
+and record like '%<SystemHealth>%') as x 
+) as y 
+order by record_id desc
+
+--select * from #cpu_usage order by SQLProcessUtilization desc
+
+SELECT @TableHTML = @TableHTML + '<p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">CPU Usage (%)</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" bgColor="#ffffff" borderColorLight="#000000" border="1">  
+      <tr>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">EventTime</font></th>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">SQLProcessUtilization</font></th>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">SystemIdle</font></th>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">OtherProcessUtilization</font></th>  
+      </tr>'
+SELECT top 10
+      @TableHTML =  @TableHTML +
+      '<tr><td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), EventTime), '') +'</font></td>' +    
+    '<td'+case when SQLProcessUtilization > 80 then ' style="background-color:#F00;"' else ' style="background-color:#0F0;"' end +'><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), SQLProcessUtilization), '') +'</font></td>' + 
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), SystemIdle), '') +'</font></td>' + 
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), OtherProcessUtilization), '') +'</font></td></tr>' 
+FROM
+      #cpu_usage order by SQLProcessUtilization desc
+SELECT @TableHTML =  @TableHTML + '</table>'
+--================cpu stats ends
+--===============memory stats
+If OBJECT_ID('tempdb..#memory_stats') is not null
+drop table #memory_stats
+
+declare @bufferCacheHit decimal, @plancache decimal, @memorygrantspending decimal
+SELECT @bufferCacheHit=cast((a.cntr_value * 1.0 / b.cntr_value) * 100.0 as decimal(38,2))
+FROM sys.dm_os_performance_counters  a
+JOIN  (SELECT cntr_value,OBJECT_NAME 
+    FROM sys.dm_os_performance_counters  
+    WHERE counter_name = 'Buffer cache hit ratio base'
+        AND OBJECT_NAME = 'SQLServer:Buffer Manager') b ON  a.OBJECT_NAME = b.OBJECT_NAME
+WHERE a.counter_name = 'Buffer cache hit ratio'
+AND a.OBJECT_NAME = 'SQLServer:Buffer Manager'
+
+SELECT @plancache = sum(cast(size_in_bytes AS BIGINT))/1024/1024
+FROM sys.dm_exec_cached_plans 
+
+select @memorygrantspending = cntr_value from sys.dm_os_performance_counters where counter_name = 'Memory Grants Pending'
+
+SELECT @bufferCacheHit as BufferCacheHitRatio, @plancache as PlanCache, @memorygrantspending as MemoryGrantsPending,
+  physical_memory_kb/1024/1024 as PhysicaMemoryInGB,
+  committed_kb/1024/1024 as SQLCommittedInGB
+into #memory_stats
+FROM sys.dm_os_sys_info
+
+SELECT @TableHTML = @TableHTML + '<p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Memory Usage</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" bgColor="#ffffff" borderColorLight="#000000" border="1">  
+      <tr>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Buffer Cache Hit Ratio (%)</font></th>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Total PhysicalMemory (GB)</font></th>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">SQLCommittedMemory (GB)</font></th>
+    <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Plan cache (MB)</font></th>
+    <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Memory Grants Pending</font></th>
+      </tr>'
+SELECT 
+      @TableHTML =  @TableHTML +
+      '<tr><td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), BufferCacheHitRatio), '') +'</font></td>' +    
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), PhysicaMemoryInGB), '') +'</font></td>' + 
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), SQLCommittedInGB), '') +'</font></td>' +
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), PlanCache), '') +'</font></td>' +
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), MemoryGrantsPending), '') +'</font></td></tr>' 
+FROM
+      #memory_stats
+SELECT @TableHTML =  @TableHTML + '</table>'
+
+--===============memory stats ends          
+SELECT @TableHTML = @TableHTML + '<p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Job Status</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" width="100%" bgColor="#ffffff" borderColorLight="#000000" border="1">  
+      <tr>  
+      <th align="left" width="432" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Job Name</font></th>  
+      <th align="left" width="85" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Last Run</font></th>  
+      <th align="left" width="183" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Category</font></th>  
+      <th align="left" width="136" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Last Run Date</font></th>  
+      <th align="left" width="136" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Execution Time (Mi)</font></th>  
+      </tr>'
+      
+  
+SELECT 
+      @TableHTML = @TableHTML + '<tr><td><font face="Verdana" size="1">' + 
+                        ISNULL(CONVERT(VARCHAR(100), A.name), '') +'</font></td>' +    
+      CASE last_run_outcome     
+            WHEN 0 THEN '<td bgColor="#ff0000"><b><blink><font face="Verdana" size="2">
+            <a href="mailto:servicedesk@mycompany.com?subject=Job failure - ' + @Oriserver + '(' + @ServerIP + ') '+ CONVERT(VARCHAR(15), GETDATE(), 101) +'&cc=db.support@mycompany.com&body = SD please log this call to DB support,' + '%0A %0A' + '<<' + ISNULL(CONVERT(VARCHAR(100), name),'''') + '>> Job Failed on ' + @OriServer + '(' + @ServerIP + ')'+ '.' +'%0A%0A Regards,'+'">Failed</a></font></blink></b></td>'
+            WHEN 1 THEN '<td><font face="Verdana" size="1">Success</font></td>'  
+            WHEN 3 THEN '<td><font face="Verdana" size="1">Cancelled</font></td>'  
+            WHEN 5 THEN '<td><font face="Verdana" size="1">Unknown</font></td>'  
+      ELSE '<td><font face="Verdana" size="1">Other</font></td>'  
+      END  +   
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), A.category),'') + '</font></td>' +   
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), A.last_run_date),'') + '</font></td>' +
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), X.execution_time_minutes),'') +'</font></td> </tr>'   
+FROM 
+      #jobs_status A
+      inner join (
+                        select 
+                              A.job_id, A.start_execution_date,
+                              datediff(mi, A.last_executed_step_date, A.stop_execution_date) execution_time_minutes 
+                        from 
+                              msdb..sysjobactivity A
+          inner join (
+              select 
+                  max(session_id) sessionid,
+                  job_id 
+              from 
+                  msdb..sysjobactivity 
+              group by 
+                  job_id
+                        ) B on a.job_id = B.job_id and a.session_id = b.sessionid
+      inner join (
+                        select 
+                              distinct name, 
+                              job_id 
+                        from 
+                              msdb..sysjobs
+                        ) C on A.job_id = c.job_id
+                        ) X on A.job_id = X.job_id
+   where enabled = 1
+ORDER BY 
+      last_run_date DESC  
+--select * from #jobs_status
+SET @TableHTML = @TableHTML +
+      '</table>'
+
+
+--====================database details
+SELECT 
+      @TableHTML =  @TableHTML + 
+      '<p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Databases</font>
+      <table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" width="100%" border="1">
+        <tr>
+            <td width="35%" bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">Name</font></b></td>
+            <td width="23%" bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">CreatedDate</font></b></td>
+            <td width="23%" bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">DB Size(GB)</font></b></td>
+            <td width="30%" bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">State</font></b></td>
+            <td width="50%" bgColor="#000080" height="15"><b>
+            <font face="Verdana" size="1" color="#FFFFFF">RecoveryModel</font></b></td>
+        </tr>'
+      
+
+select 
+@TableHTML =  @TableHTML +   
+      '<tr><td><font face="Verdana" size="1">' + ISNULL(name, '') +'</font></td>' +    
+      '<td><font face="Verdana" size="1">' + CONVERT(VARCHAR(2), DATEPART(dd, create_date)) + '-' + CONVERT(VARCHAR(3),DATENAME(mm,create_date)) + '-' + CONVERT(VARCHAR(4),DATEPART(yy,create_date)) +'</font></td>' +    
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), AA.[Total Size GB]), '') +'</font></td>' +    
+      '<td><font face="Verdana" size="1">' + ISNULL(state_desc, '') +'</font></td>' +    
+      '<td><font face="Verdana" size="1">' + ISNULL(recovery_model_desc, '') +'</font></td></tr>'
+from 
+      sys.databases MST
+      inner join (
+      --select b.name [LOG_DBNAME], 
+      --                CONVERT(DECIMAL(10,2),sum(CONVERT(DECIMAL(10,2),(a.size * 8)) /1024)/1024) [Total Size GB]
+      --                from sys.sysaltfiles A
+      --                inner join sys.databases B on A.dbid = B.database_id
+      --                group by b.name
+                        
+                        select b.name [LOG_DBNAME],  
+        CONVERT(DECIMAL(10,2),sum(CONVERT(DECIMAL(10,2),a.size) )*8/1024/1024) [Total Size GB] 
+    --CONVERT(DECIMAL(10,2),sum(CONVERT(DECIMAL(10,2),(a.size * 8)) /1024)) [Total Size MB]  
+    from sys.sysaltfiles A  
+    inner join sys.databases B 
+    on A.dbid = B.database_id  
+    group by b.name
+      )AA on AA.[LOG_DBNAME] = MST.name
+order by 
+      MST.name
+
+SET @TableHTML = @TableHTML +
+      '</table>'
+
+--=======================database details ends
+--=======================index fragmentation
+If exists (select * from tempdb.sys.all_objects where name like '#db_frag%' )
+drop table #db_frag
+create table #db_frag
+(  DatabaseName varchar(100),
+  ObjectName varchar(100),
+  indexName varchar(100),
+  avg_fragmentation_percent float,
+  page_count int,
+  IndexType varchar(100),
+  Action_Required varchar(100) default 'NA'
+)
+
+insert into #db_frag (DatabaseName,ObjectName, indexName,avg_fragmentation_percent,page_count,IndexType)
+
+exec master.sys.sp_MSforeachdb ' USE [?]
+
+SELECT db_name() as DatabaseName, OBJECT_NAME (a.object_id) as ObjectName, 
+b.name as IndexName, 
+avg_fragmentation_in_percent, page_count, index_type_desc
+-- , record_count, avg_page_space_used_in_percent --(null in limited)
+FROM sys.dm_db_index_physical_stats (db_id(), NULL, NULL, NULL, NULL) AS a
+JOIN sys.indexes AS b 
+ON a.object_id = b.object_id AND a.index_id = b.index_id
+WHERE b.index_id <> 0 and avg_fragmentation_in_percent > 70
+and page_count > 1000
+'
+
+ 
+update #db_frag
+set Action_Required ='Rebuild'
+where avg_fragmentation_percent >30 
+
+
+update #db_frag
+set Action_Required ='Rorganize'
+where avg_fragmentation_percent <30 and avg_fragmentation_percent >10
+
+
+SELECT @TableHTML = @TableHTML + '<p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Index Fragmentation (> 70%)</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" bgColor="#ffffff" borderColorLight="#000000" border="1">  
+      <tr>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Database Name</font></th>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Object Name</font></th>  
+      <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Index Name</font></th>
+    <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Avg Frag (%)</font></th>
+    <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Page Count</font></th> 
+    <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">Type</font></th>
+    <th align="left" bgColor="#000080">  
+      <font face="Verdana" size="1" color="#FFFFFF">ActionRequired</font></th>
+      </tr>'
+SELECT 
+      @TableHTML =  @TableHTML +
+      '<tr style="color:#F00"><td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), DatabaseName), '') +'</font></td>' +    
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), ObjectName), '') +'</font></td>' + 
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), indexName), '') +'</font></td>' + 
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), avg_fragmentation_percent), '') +'</font></td>' + 
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), page_count), '') +'</font></td>' + 
+    '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), IndexType), '') +'</font></td>' + 
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), Action_Required), '') +'</font></td></tr>' 
+FROM
+      #db_frag
+SELECT @TableHTML =  @TableHTML + '</table>'
+
+--=========================index fragmentation ends
+--------
+--=========================Mirror Status
+If exists (select * from tempdb.sys.all_objects where name like '#mirror_status%' )
+BEGIN      
+ DROP TABLE #mirror_status     
+END
+CREATE TABLE #mirror_status  
+(  
+ name varchar(30),   
+ mdbid int,  
+ status varchar (30),  
+ partnername varchar(50)  
+)
+INSERT into #mirror_status(name, mdbid,[status],partnername) 
+SELECT DB_NAME(database_id),database_id,mirroring_state_desc,mirroring_partner_name  
+FROM sys.database_mirroring  
+WHERE mirroring_role is NOT NULL  
+
+if exists (select * from #mirror_status)
+begin
+  SELECT   
+   @TableHTML =  @TableHTML +   
+   '<br><font face="Verdana" size="4">Database Mirroring Status</font>
+  </table><table id="AutoNumber1" style="BORDER-COLLAPSE: collapse" borderColor="#111111" height="40" cellSpacing="0" cellPadding="0" 
+
+  width="61%" border="1">  
+     <tr>  
+    <td width="15%" bgColor="#000080" height="15"><b>  
+    <font face="Verdana" size="1" color="#FFFFFF">Database Name</font></b></td>  
+    <td width="15%" bgColor="#000080" height="15"><b>  
+    <font face="Verdana" size="1" color="#FFFFFF">Database ID</font></b></td>  
+    <td width="30%" bgColor="#000080" height="15"><b>  
+    <font face="Verdana" size="1" color="#FFFFFF">Mirror State</font></b></td> 
+    <td width="70%" bgColor="#000080" height="15"><b>  
+    <font face="Verdana" size="1" color="#FFFFFF">Mirror Partner Name </font></b></td>  
+  
+     </tr>  
+   <p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>  
+   '  
+  
+   
+  SELECT   
+   @TableHTML =  @TableHTML +     
+   '<tr><td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), 
+
+  ms.name), '') +'</font></td>' +     
+   '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), 
+
+  ms.mdbid), '') +'</font></td>' +      
+   '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), 
+
+  ms.status), '') +'</font></td>' +      
+   '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), 
+
+  ms.partnername), '') +   
+  +'</font></td></tr>'   
+  FROM   
+   #mirror_status ms  
+
+  SELECT @TableHTML =  @TableHTML + '</table>'
+end
+else
+begin
+  SELECT   
+   @TableHTML =  @TableHTML +   
+   '<br><p><font face="Verdana" size="4">Database Mirroring Status</font> (Mirroring not configured)</p>'
+end
+--============Mirror status ends
+-------
+--============REPLICATION status
+if exists(select * from master.sys.sysservers where srvname like 'repl_distributor')
+begin
+  
+  If exists (select * from tempdb.sys.all_objects where name like '#replication_status%' )
+  BEGIN      
+   DROP TABLE #replication_status
+  END
+  CREATE TABLE #replication_status(
+  [agent_name] [sysname] NOT NULL,
+  [PublicationType] [varchar](13) NULL,
+  [AgentType] [varchar](12) NULL,
+  [Status] [varchar](9) NULL,
+  [Warning] [varchar](20) NULL,
+  [last_distsync] [datetime] NULL,
+  [retention] [int] NULL,
+  [avg_latency] [int] NULL,
+  [average_runspeedPerf] [int] NULL
+  )
+  
+  if not exists (select * from master.sys.sysservers where srvname like 'repl_distributor' and datasource like @@SERVERNAME)
+  begin
+    declare @distributor varchar(50), @cmd varchar(max)
+    select @distributor = datasource from master.sys.sysservers where srvname like 'repl_distributor'
+    print 'Distributor - ' + @distributor
+
+    --SET FMTONLY OFF EXEC master.dbo.sp_addlinkedserver   
+    --          @server=N'Sunrise', 
+    --          @srvproduct=N'',
+    --          @provider=N'SQLNCLI', 
+    --          @datasrc = @distributor;
+
+    set @cmd = 'SELECT agent_name, case publication_type
+              when 0 then ''Transactional''
+              when 1 then ''Snapshot''
+              when 2 then ''Merge''
+              end as PublicationType,
+            case agent_type
+              when 1 then ''Snapshot''
+              when 2 then ''Log Reader''
+              when 3 then ''Distribution''
+              when 4 then ''Merge''
+              when 9 then ''Queue Reader''
+              end as AgentType,
+            case status
+              when 1 then ''Started''
+              when 2 then ''Succeeded''
+              when 3 then ''Progress''
+              when 4 then ''Idle''
+              when 5 then ''Retrying''
+              when 6 then ''Failed''
+              end as Status,
+            case warning
+              when 1 then ''expiration''
+              when 2 then ''latency''
+              when 4 then ''mergeexpiration''
+              when 16 then ''mergeslowrunduration''
+              when 32 then ''mergefastrunspeed''
+              when 64 then ''mergeslowrunspeed''
+              end as Warning,
+            last_distsync, retention, avg_latency, average_runspeedPerf
+    FROM OPENROWSET(''SQLNCLI'', ''Server=' + @distributor+';Trusted_Connection=yes;'',
+    ''select * from distribution.dbo.MSreplication_monitordata'') AS a'
+    
+    insert into #replication_status
+    exec (@cmd)
+
+  end
+  else
+  begin
+      insert into #replication_status
+      select agent_name, case publication_type
+              when 0 then 'Transactional'
+              when 1 then 'Snapshot'
+              when 2 then 'Merge'
+              end as PublicationType,
+            case agent_type
+              when 1 then 'Snapshot'
+              when 2 then 'Log Reader'
+              when 3 then 'Distribution'
+              when 4 then 'Merge'
+              when 9 then 'Queue Reader'
+              end as AgentType,
+            case status
+              when 1 then 'Started'
+              when 2 then 'Succeeded'
+              when 3 then 'Progress'
+              when 4 then 'Idle'
+              when 5 then 'Retrying'
+              when 6 then 'Failed'
+              end as Status,
+            case warning
+              when 1 then 'expiration'
+              when 2 then 'latency'
+              when 4 then 'mergeexpiration'
+              when 16 then 'mergeslowrunduration'
+              when 32 then 'mergefastrunspeed'
+              when 64 then 'mergeslowrunspeed'
+              end as Warning,
+            last_distsync, retention, avg_latency, average_runspeedPerf
+     from distribution.dbo.MSreplication_monitordata
+  end
+  
+  SELECT 
+      @TableHTML = @TableHTML +   
+      '<p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Replication Statistics</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" bgColor="#ffffff" borderColorLight="#000000" border="1">    
+      <tr>    
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">AgentName</font></th>    
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">PublicationType</font></th>    
+      <th align="left" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">AgentType</font></th>    
+      <th align="left" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">Status</font></th>    
+      <th align="left" bgColor="#000080"> 
+      <font face="Verdana" size="1" color="#FFFFFF">Warning</font></th>    
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Last_Dist_Sync</font></th>    
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Retention</font></th>
+    <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">avg_latency</font></th>
+    <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">average_runspeedPerf</font></th>
+      </tr>'
+
+  SELECT
+    @TableHTML = @TableHTML + 
+    '<tr>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(agent_name as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(PublicationType as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(AgentType as varchar(500)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast([Status] as varchar(50)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast([Warning] as varchar(200)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(last_distsync as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast([retention] as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(avg_latency as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(average_runspeedPerf as varchar(100)),'') +'</font></td>' +
+    '</tr>'
+  FROM #replication_status
+
+  SELECT 
+      @TableHTML = @TableHTML + N'</table>'
+
+end
+
+else
+begin
+  SELECT   
+   @TableHTML =  @TableHTML +   
+   '<br><p><font face="Verdana" size="4">Replication Status</font> (Replication not configured / No publications)</p>'
+end
+
+
+--============replication status ends
+-----------------------------
+
+-- ======== DB Log Shipping Monitor
+
+if exists (select * from msdb..log_shipping_monitor_primary)
+begin
+  SELECT 
+      @TableHTML = @TableHTML +   
+      '<p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Log Shipping Stats</font><br />
+    <font face="Verdana" size="2">Local Primaries</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" bgColor="#ffffff" borderColorLight="#000000" border="1">    
+      <tr>    
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Instance</font></th>    
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Database</font></th>    
+      <th align="left" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">BackupThreshold</font></th>    
+      <th align="left" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">LastBackup</font></th>    
+      <th align="left" bgColor="#000080"> 
+      <font face="Verdana" size="1" color="#FFFFFF">LastBackupFile</font></th>
+      </tr>'
+
+  SELECT
+    @TableHTML = @TableHTML + 
+    '<tr>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(primary_server as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(primary_database as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(backup_threshold as varchar(10)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(last_backup_date as varchar(50)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(last_backup_file as varchar(300)),'') +'</font></td>' +
+    '</tr>'
+  FROM msdb..log_shipping_monitor_primary
+
+  SELECT 
+      @TableHTML = @TableHTML + N'</table>'
+end
+
+if exists (select * from msdb..log_shipping_monitor_secondary)
+begin
+  SELECT 
+      @TableHTML = @TableHTML +   
+      '<p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>
+    <font face="Verdana" size="2">Local Secondaries</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" bgColor="#ffffff" borderColorLight="#000000" border="1">    
+      <tr>    
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">PrimaryInstance</font></th>
+    <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">SecondaryInstance</font></th>
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Database</font></th>    
+      <th align="left" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">RestoreThreshold</font></th>    
+      <th align="left" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">LastRestore</font></th>    
+      <th align="left" bgColor="#000080"> 
+      <font face="Verdana" size="1" color="#FFFFFF">LastRestoredFile</font></th>
+      </tr>'
+
+  SELECT
+    @TableHTML = @TableHTML + 
+    '<tr>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(primary_server as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(secondary_server as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(primary_database as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(restore_threshold as varchar(10)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(last_restored_date as varchar(50)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(last_restored_file as varchar(300)),'') +'</font></td>' +
+    '</tr>'
+  FROM msdb..log_shipping_monitor_secondary
+
+  SELECT 
+      @TableHTML = @TableHTML + N'</table>'
+end
+      -- Fetch from remote secondaries
+if exists (select * from msdb..log_shipping_primary_secondaries)
+begin
+  declare @remotesecondary sysname;
+  if exists (select name from tempdb..sysobjects where name like '%#remoteLSSecondaries%')
+    drop table #remoteLSSecondaries
+
+  select secondary_server into #remoteLSSecondaries from msdb..log_shipping_primary_secondaries
+
+  select top 1 @remotesecondary = secondary_server from #remoteLSSecondaries
+  
+  while(@remotesecondary is not null)
+  begin
+    set @cmd = 'select primary_server, secondary_server,
+            secondary_database, restore_threshold,
+            last_restored_date, last_restored_file
+    FROM OPENROWSET(''SQLNCLI'', ''Server=' + @remotesecondary+';Trusted_Connection=yes;'',
+    ''select * from msdb..log_shipping_monitor_secondary'') AS a'
+
+    if exists (select name from tempdb..sysobjects where name like '%#remoteLSStats%')
+    drop table #remoteLSStats
+
+    create table #remoteLSStats
+    (
+      primary_server sysname, secondary_server sysname,
+      secondary_database sysname, restore_threshold int,
+      last_restored_date varchar(50), last_restored_file varchar(500)
+    )
+
+    insert into #remoteLSStats
+    exec (@cmd)
+    delete from #remoteLSSecondaries where secondary_server = @remotesecondary
+    set @remotesecondary = NULL
+    select top 1 @remotesecondary = secondary_server from #remoteLSSecondaries
+  end
+
+  --select * from #remoteLSStats
+  SELECT 
+      @TableHTML = @TableHTML +   
+      '<p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>
+    <font face="Verdana" size="2">Remote Secondaries</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" bgColor="#ffffff" borderColorLight="#000000" border="1">    
+      <tr>    
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">PrimaryInstance</font></th>
+    <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">SecondaryInstance</font></th>
+      <th align="left" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Database</font></th>    
+      <th align="left" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">RestoreThreshold</font></th>    
+      <th align="left" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">LastRestore</font></th>    
+      <th align="left" bgColor="#000080"> 
+      <font face="Verdana" size="1" color="#FFFFFF">LastRestoredFile</font></th>
+      </tr>'
+
+  SELECT
+    @TableHTML = @TableHTML + 
+    '<tr>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(primary_server as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(secondary_server as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(secondary_database as varchar(100)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(restore_threshold as varchar(10)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(last_restored_date as varchar(50)),'') +'</font></td>' +
+      '<td><font face="Verdana" size="1">' + isnull(cast(last_restored_file as varchar(300)),'') +'</font></td>' +
+    '</tr>'
+  FROM #remoteLSStats
+
+  SELECT 
+      @TableHTML = @TableHTML + N'</table>'
+
+end
+
+
+
+-- ========== DB Log shipping monitor ends
+
+-- Code for SQL Server Database Backup Stats
+SELECT 
+      @TableHTML = @TableHTML +   
+      '<p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Backup Stats</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" width="933" bgColor="#ffffff" borderColorLight="#000000" border="1">    
+      <tr>    
+      <th align="left" width="91" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Date</font></th>    
+      <th align="left" width="105" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Database</font></th>    
+      <th align="left" width="165" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">File Name</font></th>    
+      <th align="left" width="75" bgColor="#000080">    
+       <font face="Verdana" size="1" color="#FFFFFF">Type</font></th>    
+      <th align="left" width="165" bgColor="#000080"> 
+      <font face="Verdana" size="1" color="#FFFFFF">Start Time</font></th>    
+      <th align="left" width="165" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">End Time</font></th>    
+      <th align="left" width="136" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Size(GB)</font></th>    
+      </tr>' 
+
+SELECT 
+      @TableHTML =  @TableHTML +     
+      '<tr>  
+      <td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(2), DATEPART(dd,MST.backup_start_date)) + '-' + CONVERT(VARCHAR(3),DATENAME(mm, MST.backup_start_date)) + '-' + CONVERT(VARCHAR(4), DATEPART(yyyy, MST.backup_start_date)),'') +'</font></td>' +      
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), MST.database_name), '') +'</font></td>' +      
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(100), MST.name), '') +'</font></td>' +   
+      CASE Type 
+      WHEN 'D' THEN '<td><font face="Verdana" size="1">' + 'Full' +'</font></td>'    
+      WHEN 'I' THEN '<td><font face="Verdana" size="1">' + 'Differential' +'</font></td>'
+      WHEN 'L' THEN '<td><font face="Verdana" size="1">' + 'Log' +'</font></td>'
+      WHEN 'F' THEN '<td><font face="Verdana" size="1">' + 'File or Filegroup' +'</font></td>'
+      WHEN 'G' THEN '<td><font face="Verdana" size="1">' + 'File Differential' +'</font></td>'
+      WHEN 'P' THEN '<td><font face="Verdana" size="1">' + 'Partial' +'</font></td>'
+      WHEN 'Q' THEN '<td><font face="Verdana" size="1">' + 'Partial Differential' +'</font></td>'
+      ELSE '<td><font face="Verdana" size="1">' + 'Unknown' +'</font></td>'
+      END + 
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), MST.backup_start_date), '') +'</font></td>' +  
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(50), MST.backup_finish_date), '') +'</font></td>' +  
+      '<td><font face="Verdana" size="1">' + ISNULL(CONVERT(VARCHAR(10), CAST((MST.backup_size/1024)/1024/1024 AS DECIMAL(10,2))), '') +'</font></td>' +  
+       '</tr>'     
+FROM 
+      msdb..backupset MST
+WHERE 
+      MST.backup_start_date BETWEEN @StartDate AND @EndDate
+ORDER BY 
+      MST.backup_start_date DESC
+
+SELECT @TableHTML =  @TableHTML + '</table>'
+
+/*
+-- Code for physical database backup file present on disk
+INSERT #url
+SELECT DISTINCT 
+      SUBSTRING(BMF.physical_device_name, 1, len(BMF.physical_device_name) - CHARINDEX('\', REVERSE(BMF.physical_device_name), 0))
+from 
+      msdb..backupset MST
+      inner join msdb..backupmediafamily BMF ON BMF.media_set_id = MST.media_set_id
+where 
+      MST.backup_start_date BETWEEN @startdate AND @enddate
+
+select @Cnt = COUNT(*) FROM #url
+
+WHILE @Cnt >0
+BEGIN
+
+      SELECT @URL = url FROM #url WHERE idd = @Cnt
+      SELECT @Str = 'EXEC master.dbo.xp_cmdshell ''dir "' + @URL +'" /B/O:D'''
+
+      INSERT #dirpaths SELECT 'PATH: ' + @URL
+      INSERT #dirpaths
+      
+      EXEC (@Str)
+      
+      INSERT #dirpaths values('')
+
+      SET @Cnt = @Cnt - 1
+      
+end
+
+DELETE FROM #dirpaths WHERE files IS NULL
+
+select 
+      @TableHTML = @TableHTML +   
+      '<p style="margin-top: 1; margin-bottom: 0">&nbsp;</p>
+      <font face="Verdana" size="4">Physical Backup Files</font>
+      <table style="BORDER-COLLAPSE: collapse" borderColor="#111111" cellPadding="0" width="933" bgColor="#ffffff" borderColorLight="#000000" border="1">    
+      <tr>    
+      <th align="left" width="91" bgColor="#000080">    
+      <font face="Verdana" size="1" color="#FFFFFF">Physical Files</font></th>
+      </tr>'    
+
+SELECT 
+      @TableHTML =  @TableHTML + '<tr>'  + 
+      CASE SUBSTRING(files, 1, 5) 
+            WHEN 'PATH:' THEN '<td bgcolor = "#D7D7D7"><b><font face="Verdana" size="1">' + files  + '</font><b></td>' 
+      ELSE 
+            '<td><font face="Verdana" size="1">' + files  + '</font></td>' 
+      END + 
+      '</tr></table>'  
+FROM 
+      #dirpaths  
+*/
+SELECT 
+      @TableHTML =  @TableHTML +   
+      '<p style="margin-top: 0; margin-bottom: 0">&nbsp;</p>
+      <hr color="#000000" size="1">
+      <!--<p><font face="Verdana" size="2"><b>Server Owner:</b> '+@owner+'</font></p> -->
+      <p style="margin-top: 0; margin-bottom: 0"><font face="Verdana" size="2">Thanks   
+      and Regards,</font></p>  
+      <p style="margin-top: 0; margin-bottom: 0"><font face="Verdana" size="2">DB   
+      Support Team</font></p>  
+      <p>&nbsp;</p>'  
+
+EXEC msdb.dbo.sp_send_dbmail  
+      @profile_name = @MailProfile,    
+      @recipients=@Recepients,    
+      @subject = @strSubject,    
+      @body = @TableHTML,    
+      @body_format = 'HTML' ;  
+
+--print @TableHTML
+SET NOCOUNT OFF
