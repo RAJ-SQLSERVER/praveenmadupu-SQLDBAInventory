@@ -1,0 +1,110 @@
+Topic: Shrink SQL Server Transaction Log for all Databases.
+Generate T-SQL commands to shrink all SQL Server user database log files or shrink a single database log file back to the original size or as small as possible.
+
+--https://www.mssqltips.com/sqlservertip/6385/shrink-sql-server-transaction-log-for-all-databases/
+
+solution involves creating a T-SQL stored procedure in a SQL Server database called dbo.usp_ShrinkAllLogsExcludeSysDBS that will get a parameter for the database name.
+
+The parameter will default to '%' meaning all user databases are in scope if a database is not specified.
+The procedures uses a VARCHAR (max) parameter (@TSQLExec) in order to execute the T-SQL shrink statement (or block of statements) dynamically.
+The code executed for each user database will contain a CHECKPOINT statement and a DBCC SHRINKFILE statement. 
+
+Issuing a manual CHECKPOINT statement in the SQL Server database will write the current in-memory modified pages (known as dirty pages) and 
+transaction log information from memory to disk and also record the information in the transaction log.
+
+The DBCC SHRINKFILE statement will shrink the current database's specified data or log file size. In this case I will not use any target database file size. 
+If this parameter is not specified, then the DBCC SHRINKFILE statement will reduce the file size to its creation size. Author didn't use a target size parameter in order to avoid any errors.
+The procedure joins sys.databases and sys.master_files system views in order to generate the CHECKPOINT and DBCC SHRINKFILE statement for all the user databases. 
+It filters the system databases (DBID > 4) because these statements are not recommended for the system databases.
+
+========================================================================================================================
+-- ================================================================================= 
+-- Author:         Eli Leiba 
+-- Create date:    2020-03
+-- Procedure Name: dbo.usp_ShrinkAllLogsExcludeSysDBS 
+-- Description:    This procedure shrinks all user databases log files or a specific user database log 
+-- ================================================================================== 
+CREATE PROCEDURE dbo.usp_ShrinkAllLogsExcludeSysDBS (@dbname SYSNAME = '%')
+AS
+BEGIN
+ 
+DECLARE @TSQLExec VARCHAR (MAX) = '';
+SET NOCOUNT ON;
+ 
+IF OBJECT_ID('tempdb..#Temp') IS NOT NULL
+       DROP TABLE #temp
+
+CREATE TABLE #temp (dbname sysname, dbid int, logFileSizeBeforeMB decimal(15,2), logFileSizeAfterMB decimal(15,2));
+
+WITH fs
+AS
+(
+    SELECT database_id, TYPE, SIZE * 8.0 / 1024 SIZE
+    FROM sys.master_files
+)
+INSERT INTO #temp (dbname, dbid, logFileSizeBeforeMB)
+SELECT 
+    name, database_id,
+    (SELECT SUM(SIZE) FROM fs WHERE TYPE = 1 AND fs.database_id = db.database_id) LogFileSizeMB
+FROM sys.databases db
+WHERE database_id > 4
+AND NAME LIKE @dbname;
+ 
+SELECT @TSQLExec = CONCAT (
+  @TSQLExec,
+  'USE [',
+  d.NAME,
+  ']; CHECKPOINT; DBCC SHRINKFILE ([',
+  f.NAME + ']) with no_infomsgs;' ,
+  Char (13),Char (10))
+FROM sys.databases d,
+     sys.master_files f
+WHERE d.database_id = f.database_id
+      AND d.database_id > 4
+      AND f.type = 1
+      AND d.NAME LIKE @dbname;
+PRINT @TSQLExec;
+EXEC (@TSQLExec);
+ 
+WITH fs
+AS
+(
+    SELECT database_id, TYPE, SIZE * 8.0 / 1024 SIZE
+    FROM sys.master_files
+)
+UPDATE a
+set a.logFileSizeAfterMB = (SELECT SUM(SIZE) FROM fs WHERE TYPE = 1 AND fs.database_id = db.database_id)
+FROM #temp a
+inner join sys.databases db on a.dbid = db.database_id
+WHERE database_id > 4
+AND NAME LIKE @dbname
+ 
+SELECT * FROM #temp ORDER BY dbname
+SET NOCOUNT OFF;
+END;
+GO
+======================================================================================================================
+Here are examples for executing this stored procedure:
+
+-- shrink database log for all user databases
+USE master
+GO
+EXEC dbo.usp_ShrinkAllLogsExcludeSysDBS 
+GO
+
+-- shrink database log for just database Test2
+USE master
+GO
+EXEC dbo.usp_ShrinkAllLogsExcludeSysDBS 'Test2'
+GO
+
+========================================================================================================================
+Here are the results for running against all databases.  
+You can see for database Test2 the log went from 8072MB to 8MB, but the others didn't change because it was unable to shrink the log file any further.
+
+output
+Next Steps
+You can create and compile this simple procedure in your master database and use it as a simple SQL tool for shrinking all the user database log files or 
+shrinking a specific user database log.
+The procedure was tested for SQL Server 2014 and 2017, but should work for SQL Server 2005 and later.
+
