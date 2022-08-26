@@ -1,0 +1,62 @@
+Stop Long Running SQL Server Agent Jobs
+--SQL Stored Procedure that will stop currently long running SQL Server Agent Jobs by the specified maximum minute threshold.
+
+https://jonlabelle.com/snippets/view/sql/stop-long-running-sql-server-agent-jobs
+
+create procedure usp_StopLongRunningSqlJobs
+    @MaxAllowedRunningMinutes int = 20
+as
+begin
+-- ============================================================================
+-- Stops current long running SQL Server Agent Jobs
+--
+-- Name: dbo.sp_StopLongRunningSqlJobs
+-- Type: Stored Procedure
+-- Scope: System Level
+-- Author: Jon LaBelle
+-- Created: 08-27-2015
+--
+-- Parameters:
+--
+-- - @MaxAllowedRunningMinutes int - The maximum allowed time in minutes
+--                                   a job is allowed to run. Any job currently
+--                                   running over the specified amount, will be
+--                                   stopped. The default value is "20" minutes.
+-- ============================================================================
+
+    set nocount on;
+
+    if @MaxAllowedRunningMinutes is null
+    begin
+        set @MaxAllowedRunningMinutes = 20;
+    end;
+
+    declare @JobName nvarchar(256);
+    declare @MinutesRunning int;
+    declare @runningJobs table(
+        JobName nvarchar(256) NULL,
+        MinutesRunning int NULL
+    );
+
+    --
+    -- Populate @runningJobs table
+    insert into @runningJobs
+        select sj.name as JobName,
+            DATEDIFF(minute, sja.start_execution_date, GETDATE()) as MinutesRunning
+        from msdb.dbo.sysjobactivity as sja
+        inner join msdb.dbo.sysjobs as sj
+            on sja.job_id = sj.job_id
+        where CONVERT(date, sja.start_execution_date) = CONVERT(date, GETDATE())
+            and sja.stop_execution_date is null;
+
+    --
+    -- Stop a long running job.
+    -- TODO: use a cursor to iterate over more than 1 long running job.
+    if exists (select MinutesRunning from @runningJobs where MinutesRunning > @MaxAllowedRunningMinutes)
+    begin
+        select top 1 @JobName = JobName from @runningJobs where MinutesRunning > @MaxAllowedRunningMinutes;
+        print N'Stopping long running (over '+ convert(nvarchar(10), @MaxAllowedRunningMinutes) +'-minutes) SQL Agent Job "' + @JobName + '".';
+        exec msdb.dbo.sp_stop_job @job_name = @JobName;
+    end;
+
+end;
