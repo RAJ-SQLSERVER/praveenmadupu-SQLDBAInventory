@@ -1,0 +1,29 @@
+Kill Connections to Database
+
+--https://jonlabelle.com/snippets/view/sql/kill-connections-to-database
+
+create table ##killstmts(
+    stmt varchar(15)
+);
+
+insert into ##killstmts(stmt)
+    select 'KILL '+cast(spid as char(4))
+    from master..sysprocesses as p
+    inner join master..sysdatabases as d
+        on p.dbid = d.dbid
+    where d.name = '<DATABASE_NAME_HERE>'; -- Provide database name here to kill all connections
+
+declare @KILLSTMT varchar(15);
+declare killcsr cursor
+    for select * from ##killstmts;
+open killcsr;
+fetch next from killcsr into @KILLSTMT;
+while @@fetch_status = 0
+    begin
+        -- print @KILLSTMT
+        exec (@KILLSTMT);
+        fetch next from killcsr into @KILLSTMT;
+    end;
+deallocate killcsr;
+
+drop table ##killstmts;
