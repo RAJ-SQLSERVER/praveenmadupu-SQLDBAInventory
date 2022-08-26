@@ -1,0 +1,85 @@
+Backup User Databases in SQL Server
+
+--https://jonlabelle.com/snippets/view/sql/backup-user-databases-in-sql-server
+
+-- article: http://www.technologytoolbox.com/blog/jjameson/archive/2008/05/30/backing-up-user-databases-in-sql-server-and-sql-server-express.aspx
+-- github: https://github.com/jeremy-jameson/Toolbox/blob/master/SQL/BackupUserDatabases.sql
+
+use [Tools];
+go
+
+create proc dbo.BackupUserDatabases(
+    @backupType varchar(15)
+)
+as
+begin
+    declare @backupFolder varchar(255);
+    set @backupFolder = 'Backup_Path_Name\' + @backupType;
+
+    declare @timestamp datetime;
+    declare @dateString varchar(8);
+    declare @timeString varchar(12);
+
+    select @timestamp = GETDATE();
+    select @dateString = CONVERT(varchar(8), @timestamp, 112);
+    select @timeString = CONVERT(varchar(12), @timestamp, 14);
+
+    -- Remove seconds from timestamp
+    set @timeString = LEFT(REPLACE(@timeString, ':', ''), 4);
+
+    declare @databases table(
+        ID int identity(1, 1),
+        DatabaseName sysname
+    );
+
+    insert into @databases
+    select name
+    from master.dbo.sysdatabases
+    where name not in ('master', 'model', 'msdb', 'tempdb');
+
+    declare @id tinyint;
+    select @id = MIN(ID)
+    from @databases;
+
+    while @id is not null
+        begin
+            declare @databaseName sysname;
+            select @databaseName = DatabaseName
+            from @databases
+            where ID = @id;
+
+            declare @backupFileName varchar(512);
+            select @backupFileName = @databaseName + '_backup_' + @dateString + @timeString + '.bak';
+            if @backupType = 'Full'
+                begin
+                    exec ('BACKUP DATABASE ['+@databaseName+'] TO DISK ='''+@backupFolder+'\'+@BackupFileName+'''');
+            end;
+                else
+                begin
+                    if @backupType = 'Differential'
+                        begin
+                            exec ('BACKUP DATABASE ['+@databaseName+'] TO DISK ='''+@backupFolder+'\'+@BackupFileName+''' WITH DIFFERENTIAL');
+                    end;
+                        else
+                        begin
+                            if @backupType = 'Transaction Log'
+                                begin
+                                    declare @recoveryModel sql_variant;
+                                    select @recoveryModel = DATABASEPROPERTYEX(@databaseName, 'Recovery');
+                                    if @recoveryModel <> 'SIMPLE'
+                                        begin
+                                            exec ('BACKUP LOG ['+@databaseName+'] TO DISK ='''+@backupFolder+'\'+@BackupFileName+'''');
+                                    end;
+                            end;
+                                else
+                                begin
+                                    raiserror('Invalid backup type', 16, 1);
+                            end;
+                    end;
+            end;
+            delete from @databases
+            where ID = @id;
+            select @id = MIN(ID)
+            from @databases;
+        end;
+end;
