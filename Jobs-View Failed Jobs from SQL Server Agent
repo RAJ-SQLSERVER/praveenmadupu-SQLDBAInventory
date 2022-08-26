@@ -1,0 +1,47 @@
+View Failed Jobs from SQL Server Agent
+--https://jonlabelle.com/snippets/view/sql/view-failed-jobs-from-sql-server-agent
+
+select jj.instance_id,
+    sj.job_id,
+    sj.name as 'job_name',
+    sjt.step_name as 'step_name',
+    jj.run_status,
+    jj.sql_message_id,
+    jj.sql_severity,
+    jj.message,
+    jj.exec_date,
+    jj.run_duration,
+    jj.server,
+    sjt.output_file_name
+from(select ssh.instance_id,
+         sjh.job_id,
+         sjh.step_id,
+         sjh.sql_message_id,
+         sjh.sql_severity,
+         sjh.message,
+         case sjh.run_status
+             when 0 then 'Fail'
+             when 1 then 'Success'
+             when 2 then 'Retry'
+             when 3 then 'Cancel'
+             when 4 then 'In progress'
+         end as run_status,
+         SUBSTRING(CAST(sjh.run_date as varchar(8)), 5, 2) + '/' + SUBSTRING(CAST(sjh.run_date as varchar(8)), 7, 2) + '/' + SUBSTRING(CAST(sjh.run_date as varchar(8)), 1, 4) + ' ' + SUBSTRING(REPLICATE('0', 6 - LEN(CAST(sjh.run_time as varchar))) + CAST(sjh.run_time as varchar), 1, 2) + ':' + SUBSTRING(REPLICATE('0', 6 - LEN(CAST(sjh.run_time as varchar))) + CAST(sjh.run_time as varchar), 3, 2) + ':' + SUBSTRING(REPLICATE('0', 6 - LEN(CAST(sjh.run_time as varchar))) + CAST(sjh.run_time as varchar), 5, 2) as 'exec_date',
+         sjh.run_duration,
+         sjh.retries_attempted,
+         sjh.server
+     from msdb.dbo.sysjobhistory as sjh
+     join(select sjh.job_id,
+             sjh.step_id,
+             MAX(sjh.instance_id) as instance_id
+         from msdb.dbo.sysjobhistory as sjh
+         group by
+             sjh.job_id,
+             sjh.step_id) as ssh
+         on sjh.instance_id = ssh.instance_id
+     where sjh.run_status <> 1) as jj
+join msdb.dbo.sysjobs as sj
+    on jj.job_id = sj.job_id
+join msdb.dbo.sysjobsteps as sjt
+    on jj.job_id = sjt.job_id
+   and jj.step_id = sjt.step_id;
