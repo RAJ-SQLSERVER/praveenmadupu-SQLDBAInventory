@@ -1,0 +1,86 @@
+What SQL Statements Are Currently Executing
+--https://jonlabelle.com/snippets/view/sql/what-sql-statements-are-currently-executing
+
+-- What SQL Statements Are Currently Executing Utility
+--
+-- By Ian Stirk, 2009/12/11 (first published: 2008/10/28)
+-- http://www.sqlservercentral.com/articles/DMV/64425/
+--
+-- The SQL used in this utility ‘dba_WhatSQLIsExecuting’ is given in Listing 1.
+--
+-- The Dynamic Management View (DMV) sys.db_exec_requests shows which requests
+-- are currently executing, the information shown includes the handle to the
+-- whole SQL text of the batch or stored procedure (sql_handle), together with
+-- offsets relating to the section of SQL within the batch that is currently
+-- executing (statement_start_offset and statement_end_offset).
+--
+-- To determine the current section of SQL currently executing, we need to call
+-- the Dynamic Management Function (DMF) sys.dm_exec_sql_text, passing in the
+-- handle of the SQL batch that is currently executing, and then apply the
+-- relevant offsets.
+--
+-- We can get more information about the query by combining the
+-- sys.db_exec_requests DMV with the sys.processes system view (joined on
+-- spid/session_id). This information includes who is executing the query, the
+-- machine they are running from, and the name of the database.
+--
+-- The utility selects relevant fields from the sys.db_exec_requests and
+-- sys.sysprocesses views. The selected fields are described in figure 1
+-- (largely taken from SQL Server 2005 Books online).
+--
+-- |   Column name    | Data type  |                                              Description                                               |
+-- |------------------|------------|--------------------------------------------------------------------------------------------------------|
+-- | spid             | smallint   | SQL Server process ID.                                                                                 |
+-- | ecid             | smallint   | Execution context ID used to uniquely identify the subthreads operating on behalf of a single process. |
+-- | dbid             | smallint   | ID of the database currently being used by the process.                                                |
+-- | nt_username      | nchar(128) | Windows user name for the process, if using Windows Authentication, or a trusted connection.           |
+-- | status           | nchar(30)  | Process ID status. For example, running and sleeping.                                                  |
+-- | wait_type        | bigint     | Current wait time in milliseconds.                                                                     |
+-- | Individual Query | varchar    | SQL Statement currently running.                                                                       |
+-- | Parent Query     | varchar    | Routine that contains the Individual Query.                                                            |
+-- | program_name     | nchar(128) | Name of the application program.                                                                       |
+-- | Hostname         | nchar(128) | Name of the workstation.                                                                               |
+-- | nt_domain        | nchar(128) | Microsoft Windows domain for the client, if using Windows Authentication, or a trusted connection.     |
+-- | Start_time       | datetime   | Time when the request is scheduled to run.                                                             |
+--
+
+CREATE PROC [dbo].[dba_WhatSQLIsExecuting]
+AS
+/* --------------------------------------------------------------------
+Purpose: Shows what individual SQL statements are currently executing.
+----------------------------------------------------------------------
+Parameters: None.
+Revision History:
+    24/07/2008  Ian_Stirk@yahoo.com Initial version
+Example Usage:
+    1. exec YourServerName.master.dbo.dba_WhatSQLIsExecuting
+--------------------------------------------------------------------- */
+BEGIN
+    -- Do not lock anything, and do not get held up by any locks.
+    SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+
+    -- What SQL Statements Are Currently Running?
+    SELECT [Spid] = session_Id
+    , ecid
+    , [Database] = DB_NAME(sp.dbid)
+    , [User] = nt_username
+    , [Status] = er.status
+    , [Wait] = wait_type
+    , [Individual Query] = SUBSTRING (qt.text,
+             er.statement_start_offset/2,
+    (CASE WHEN er.statement_end_offset = -1
+           THEN LEN(CONVERT(NVARCHAR(MAX), qt.text)) * 2
+        ELSE er.statement_end_offset END -
+                                er.statement_start_offset)/2)
+    ,[Parent Query] = qt.text
+    , Program = program_name
+    , Hostname
+    , nt_domain
+    , start_time
+    FROM sys.dm_exec_requests er
+    INNER JOIN sys.sysprocesses sp ON er.session_id = sp.spid
+    CROSS APPLY sys.dm_exec_sql_text(er.sql_handle)as qt
+    WHERE session_Id > 50              -- Ignore system spids.
+    AND session_Id NOT IN (@@SPID)     -- Ignore this current statement.
+    ORDER BY 1, 2
+END
