@@ -1,0 +1,143 @@
+List all Users, Roles in Databases
+--https://jonlabelle.com/snippets/view/sql/list-all-users-roles-in-databases
+
+/*
+Script: list all Usernames, Roles for all the databases.
+Author: Shiva Challa (http://challa.info)
+and the database Roles that the user belongs to in all the databases. 
+Also, you can use this script to get the roles of one user in all the databases. 
+
+Directions of Use:
+For All Users list: You can directly run this script in SQL Server Management studio
+For a specific user:
+1. Find this code and u.name like ''tester''
+2. Uncomment the code 
+3. Replace the Name ''tester'' with the username you want to search on. 
+
+Resultset:
+DBName: Database name that the user exists in.
+Name: user name.
+GroupName: Group/Database Role that the user is a part of. 
+LoginName: Actual login name, if this is null, Name is used to connect.
+default_database_name
+default_schema_name
+principal_id
+sid
+
+Change History:
+08/26/2008 Shiva Challa - Removed the misc characters from the "Select of EXEC sp_MSForEachdb" statement. 
+09/02/2008 Cathy Greenselder - Convert to SQL2000
+- (default_database_name not in SQL2K)
+- (default_schema_name not in SQL2K)
+- (principal_id not in SQL2K)
+- (uid is in SQL2K
+10/08/2008 Shiva Challa - Added Cathy's script to the original script with an IF logic to make it work for both SQL 2000 and SQL 2005.
+- Added code to use SysObjects in 2000 instead of sys.objects
+10/09/2008 Cathy Greenselder - for 2000, switched the SysUsers join to use "m.groupuid" instead of "m.memberuid" 
+02/09/2009 Shiva Challa- Per Matt Karp's(forum member) suggestion, added Square brackets around dbname, 
+ - changed dbname datatype to sysname
+ - Added ServerName as well.
+
+10/29/2013 Shiva Challa - Added support for sql server 2008 and 2012 
+                        - Changed the logic to check version number, so that this will work for all future versions (that is until there is a paradigm shift, again).
+
+*/
+USE MASTER
+GO
+BEGIN
+DECLARE @SQLVerNo INT;
+SET @SQLVerNo = cast(substring(CAST(Serverproperty('ProductVersion') AS VARCHAR(50)) ,0,charindex('.',CAST(Serverproperty('ProductVersion') AS VARCHAR(50)) ,0)) as int);
+
+IF @SQLVerNo >= 9 
+    IF EXISTS (SELECT TOP 1 *
+               FROM Tempdb.sys.objects (nolock)
+               WHERE name LIKE '#TUser%')
+        DROP TABLE #TUser
+ELSE
+IF @SQLVerNo = 8
+BEGIN
+    IF EXISTS (SELECT TOP 1 *
+               FROM Tempdb.dbo.sysobjects (nolock)
+               WHERE name LIKE '#TUser%')
+        DROP TABLE #TUser
+END
+
+CREATE TABLE #TUser (
+    ServerName    varchar(256),
+    DBName        SYSNAME,
+    [Name]        SYSNAME,
+    GroupName     SYSNAME NULL,
+    LoginName     SYSNAME NULL,
+    default_database_name  SYSNAME NULL,
+    default_schema_name    VARCHAR(256) NULL,
+    Principal_id  INT,
+    [sid]         VARBINARY(85))
+
+IF @SQLVerNo = 8
+BEGIN
+	INSERT INTO #TUser
+	EXEC sp_MSForEachdb
+	'
+	 SELECT 
+	   @@SERVERNAME,
+	   ''?'' as DBName,
+	   u.name As UserName,
+	   CASE WHEN (r.uid IS NULL) THEN ''public'' ELSE r.name END AS GroupName,
+	   l.name AS LoginName,
+	   NULL AS Default_db_Name,
+	   NULL as default_Schema_name,
+	   u.uid,
+	   u.sid
+	 FROM [?].dbo.sysUsers u
+	   LEFT JOIN ([?].dbo.sysMembers m 
+	   JOIN [?].dbo.sysUsers r
+	   ON m.groupuid = r.uid)
+	   ON m.memberuid = u.uid
+	   LEFT JOIN dbo.sysLogins l
+	   ON u.sid = l.sid
+	 WHERE u.islogin = 1 OR u.isntname = 1 OR u.isntgroup = 1
+	   /*and u.name like ''tester''*/
+	 ORDER BY u.name
+	'
+END
+
+ELSE 
+IF @SQLVerNo >= 9
+BEGIN
+	INSERT INTO #TUser
+	EXEC sp_MSForEachdb
+	'
+	 SELECT 
+	   @@SERVERNAME,
+	   ''?'',
+	   u.name,
+	   CASE WHEN (r.principal_id IS NULL) THEN ''public'' ELSE r.name END GroupName,
+	   l.name LoginName,
+	   l.default_database_name,
+	   u.default_schema_name,
+	   u.principal_id,
+	   u.sid
+	 FROM [?].sys.database_principals u
+	   LEFT JOIN ([?].sys.database_role_members m
+	   JOIN [?].sys.database_principals r 
+	   ON m.role_principal_id = r.principal_id)
+	   ON m.member_principal_id = u.principal_id
+	   LEFT JOIN [?].sys.server_principals l
+	   ON u.sid = l.sid
+	 WHERE u.TYPE <> ''R''
+	   /*and u.name like ''tester''*/
+	 order by u.name
+	 '
+END
+
+SELECT *
+FROM #TUser
+ORDER BY DBName,
+ [name],
+ GroupName
+
+DROP TABLE #TUser
+END
+
+
+/** end of script **/
