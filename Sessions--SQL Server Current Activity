@@ -1,0 +1,123 @@
+SQL Server Current Activity
+--https://jonlabelle.com/snippets/view/sql/sql-server-current-activity
+
+-- =============================================================================
+-- SQL Server Current Activity SuperCheck
+--
+-- Identify active or blocking connections, and list the active command on the
+-- connection.
+--
+-- Status Field Definitions
+-- ------------------------
+-- Background   SPID is performing a background task.
+-- Sleeping     SPID is not currently executing. This usually indicates that
+--              the SPID is awaiting a command from the application.
+-- Runnable     SPID is currently executing.
+-- Dormant      Same as Sleeping, except Dormant also indicates that the SPID
+--              has been reset after completing an RPC event. The reset cleans
+--              up resources used during the RPC event. This is a normal state
+--              and the SPID is available and waiting to execute further
+--              commands.
+-- Rollback     The SPID is in rollback of a transaction.
+-- Defwakeup    Indicates that a SPID is waiting on a resource that is in the
+--              process of being freed. The wait resource field should indicate
+--              the resource in question.
+-- Spinloop     Process is waiting while attempting to acquire a spin-lock used
+--              for concurrency control on SMP systems
+--
+-- Author: Benjamin Bolte, <brbolte@msn.com>
+-- http://www.sqlservercentral.com/scripts/Lock+and+Connection+Management/30042/
+-- =============================================================================
+
+set nocount on;
+
+create table #ProcCheck(
+    Status varchar(50),
+    SPID int,
+    CPU int,
+    Pys_IO int,
+    WaitTime int,
+    BlockSPID int,
+    LastCmd varchar(500),
+    HostName varchar(36),
+    ProgName varchar(100),
+    NTUser varchar(50),
+    LoginTime datetime,
+    LastBatch datetime,
+    OpenTrans int
+);
+
+create table #ProcInfo(
+    EventType varchar(100),
+    Parameters int,
+    EventInfo varchar(7000)
+);
+
+insert into #ProcCheck(
+    Status,
+    SPID,
+    CPU,
+    Pys_IO,
+    WaitTime,
+    BlockSPID,
+    HostName,
+    ProgName,
+    NTUSer,
+    LoginTime,
+    LastBatch,
+    OpenTrans
+)
+select status,
+    SPID,
+    CPU,
+    Physical_IO,
+    WaitTime,
+    Blocked,
+    substring(HostName, 1, 36),
+    substring(Program_Name, 1, 100),
+    substring(nt_username, 1, 50),
+    Login_Time,
+    Last_Batch,
+    Open_Tran
+from master..sysprocesses
+where(blocked > 0
+    or spid in (
+        select blocked
+        from master..sysprocesses (NOLOCK)
+        where blocked > 0)
+    or open_tran > 0)
+and SPID <> @@SPID;
+
+declare @spid int,
+    @cmd varchar(7000);
+
+declare Procs cursor fast_forward
+    for select SPID from #ProcCheck;
+
+open Procs;
+fetch next from Procs into @SPID;
+while @@FETCH_STATUS = 0
+    begin
+        set @cmd = 'DBCC INPUTBUFFER('+convert(varchar, @SPID)+')';
+
+        insert into #ProcInfo
+            exec (@cmd);
+
+        select @cmd = EventInfo
+        from #ProcInfo;
+
+        delete from #ProcInfo;
+
+        update #ProcCheck
+        set LastCmd = substring(@cmd, 1, 500)
+        where SPID = @SPID;
+
+        fetch next from Procs into @SPID;
+    end;
+close Procs;
+deallocate Procs;
+
+select * from #ProcCheck;
+
+drop table #ProcCheck;
+drop table #ProcInfo;
