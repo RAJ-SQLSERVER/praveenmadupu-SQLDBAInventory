@@ -1,0 +1,61 @@
+SQL Server User Login Audit
+--https://jonlabelle.com/snippets/view/sql/sql-server-user-login-audit
+
+-- Lists user login attempts to a SQL Server (failed and successful login
+-- attempts)
+-- 
+-- This script is useful for security audits (helping you gather information
+-- about failed login attempts), and for checking recent activity by a
+-- particular login (before you delete a login, for example).
+-- 
+-- The script lists all failed login attempts by a user, including the IP
+-- address of the computer from which the login attempts were made. The last
+-- successful login for a user is also listed.
+-- 
+-- Note: security logging must be enabled on the SQL Server you are monitoring,
+-- otherwise this script will not return accurate results.
+
+declare @TSQL nvarchar(2000);
+declare @lC int;
+
+create table #TempLog(
+    LogDate datetime,
+    ProcessInfo nvarchar(50),
+    Text nvarchar(max)
+);
+
+create table #logF(
+    ArchiveNumber int,
+    LogDate datetime,
+    LogSize int
+);
+
+insert into #logF exec sp_enumerrorlogs;
+select @lC = min(ArchiveNumber) from #logF;
+
+while @lC is not null
+    begin
+        insert into #TempLog exec sp_readerrorlog @lC;
+        select @lC = min(ArchiveNumber) from #logF where ArchiveNumber > @lC;
+    end;
+
+--Failed login counts. Useful for security audits.
+select
+    'Failed - ' + convert(nvarchar(5), count(Text)) + ' attempts' as [Login Attempt],
+    Text as Details
+from #TempLog
+where ProcessInfo = 'Logon'
+    and Text like '%failed%'
+group by Text;
+
+--Find Last Successful login. Useful to know before deleting "obsolete" accounts.
+select distinct 'Successful - Last login at (' + convert(nvarchar(64), max(LogDate)) + ')' as [Login Attempt],
+    Text as Details
+from #TempLog
+where ProcessInfo = 'Logon'
+    and Text like '%succeeded%'
+    and Text not like '%NT AUTHORITY%'
+group by Text;
+
+drop table #TempLog;
+drop table #logF;
