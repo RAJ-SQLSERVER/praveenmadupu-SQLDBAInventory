@@ -1,0 +1,19 @@
+SQL Server Agent Job Step Duration Times
+--https://jonlabelle.com/snippets/view/sql/sql-server-agent-job-step-duration-times
+
+select distinct j.name as [JobName],
+    jt.Step_ID as [StepID],
+    jt.Step_Name as [StepName],
+    SUBSTRING(CAST(jt.Last_Run_Duration as varchar(10)), LEN(CAST(jt.Last_Run_Duration as varchar(10))) - 5, 2) as [Hours],
+    SUBSTRING(CAST(jt.Last_Run_Duration as varchar(10)), LEN(CAST(jt.Last_Run_Duration as varchar(10))) - 3, 2) as [Minutes],
+    RIGHT(jt.Last_Run_Duration, 2) as [Seconds],
+    jt.Last_Run_Date as [LastRunDate],
+    jt.Last_Run_Time as [Time],
+    getdate() as [Check Date]
+from msdb.dbo.sysjobs as j
+inner join msdb.dbo.sysjobschedules as js
+    on js.job_Id = j.job_id
+inner join msdb.dbo.sysjobsteps as jt
+    on jt.job_id = j.job_id
+where j.name = '<job_name>'
+order by StepID;
