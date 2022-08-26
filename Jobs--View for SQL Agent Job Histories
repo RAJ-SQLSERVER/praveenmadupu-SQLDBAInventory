@@ -1,0 +1,439 @@
+View for SQL Agent Job Histories
+--https://jonlabelle.com/snippets/view/sql/view-for-sql-agent-job-histories
+
+These 3 views work together to aggregate and simplify SQL Agent Job execution details. 
+They are useful for analyzing job interaction patterns (like overlapping job steps), performance details, or just to get a quick peek at what SQL Agent Jobs are doing.
+
+if exists (select * from sys.views where object_id = OBJECT_ID(N'[dbo].[VW_JOBS_HIST_BASE]'))
+    begin
+        drop view dbo.VW_JOBS_HIST_BASE
+    end;
+go
+
+create view dbo.VW_JOBS_HIST_BASE
+/**
+ * Name      : dbo.[VW_JOBS_HIST_BASE].sql
+ * Author    : Brad Joss (bradjoss@hotmail.com)
+ * Purpose   : View to standardize common details extracted from SQL Agent Job
+ *             run histories. Several components of this view were taken from
+ *             publically posted articles. Sadly, I did a poor job of documenting
+ *             the source of those articles at the time I coded this, sorry.
+ *
+ * A "private" view used by the other two as a basis for historical information.
+ *
+ * Based on View for SQL Agent Job Histories:
+ * http://www.codeproject.com/Tips/671292/View%ADfor%ADSQL%ADAgent%ADJob%ADHistories
+ *
+ * Change Date   Change By                           Change Description
+ * -----------   -------------                       ---------------------------
+ * 6/25/13       Brad Joss (bradjoss@hotmail.com)    Inital Creation
+ * 3/12/14       Brad Joss                           [msdb].[dbo].[agent_datetime]
+ * 3/14/16       Jon LaBelle                         Don't lock on system table reads.
+ */
+as
+with cte
+     as (
+        select msdb.dbo.agent_datetime (run_date, run_time) as exec_dtm,
+             -- Convert runtime duration to seconds
+             ((run_duration / 1000000) * 86400 + (((run_duration - ((run_duration / 1000000) * 1000000)) / 10000) * 3600) + (((run_duration - ((run_duration / 10000) * 10000)) / 100) * 60) + (run_duration - (run_duration / 100) * 100)) as run_dur_sec,
+             -- Switch status to text
+             case run_status
+                 when 0
+                     then 'Failed'
+                 when 1
+                     then 'Succeeded'
+                 when 2
+                     then 'Retry'
+                 when 3
+                     then 'Cancelled'
+                 when 4
+                     then 'In Progress'
+             end as run_status_desc,
+             -- Define what "success" means for any given execution so later we
+             -- can write queries that say show me the querys that were
+             -- successful, or moreover, show me average runtimes of successful
+             -- queries, ignoring failures.
+             CAST(case run_status
+                      when 0
+                          then 0 --'Failed'
+                      when 1
+                          then 1 --'Succeeded'
+                      when 2
+                          then 0 --'Retry'
+                      when 3
+                          then 0 --'Cancelled'
+                      when 4
+                          then null -- 'In Progress' -- In progress, we don't know
+                  end as bit) as is_success,
+             -- Tidy up the messages to improve readability, and make suitable
+             -- for copy and pasting results into Excel for analysis
+             -- TODO: Alter these as needed to make messages pretty
+             LTRIM(RTRIM(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(message, 'Warning: Null value is eliminated by an aggregate or other SET operation. [SQLSTATE 01003] (Message 8153)', ''), 'Warning: The join order has been enforced because a local join hint is used. [SQLSTATE 01000] (Message 8625)', ''), 'Unable to open Step output file.', ''), '[SQLSTATE 01000] (Message 0)', ''), 'The step succeeded.', ''), '.', ' '))) as fmt_message,
+             *
+         from msdb..sysjobhistory with (nolock)
+         where LOWER(step_name) <> '(job outcome)')
+     select *,
+         -- For any given job step, I frequenetly want to get the fastest,
+         -- slowest and most recent runtimes. While these add overhead, given
+         -- this is primarily a diagnostic view, they make composing the outer
+         -- queries cleaner and easier.
+         ROW_NUMBER() over(partition by job_id, step_id order by run_duration asc) as step_run_dur_asc,
+         ROW_NUMBER() over(partition by job_id, step_id order by run_duration desc) as step_run_dur_desc,
+         ROW_NUMBER() over(partition by job_id, step_id order by ISNULL(exec_dtm, CAST('1/1/1900' as datetime)) desc, run_time desc) as step_run_date_desc
+     from cte;
+go
+-- select top 1 * from dbo.VW_JOBS_HIST_BASE;
+-- go
+
+if exists (select * from sys.views where object_id = OBJECT_ID(N'[dbo].[VW_JOBS_HIST]'))
+    begin
+        drop view dbo.VW_JOBS_HIST
+    end;
+go
+
+create view dbo.VW_JOBS_HIST
+/**
+ * Name      : dbo.[VW_JOBS_HIST].sql
+ * Author    : Brad Joss
+ * Purpose   : View that exposes SQL agent job history details in a more
+ *             usable format.
+ *
+ * Displays one row for each job step execution.
+ *
+ * - Database Name
+ * - Bit flag indicating if job will run against currently selected DB
+ * - Job and Step Names and IDs
+ * - Job created and modified dates
+ * - Bit flag indicating if the job is enabled
+ * - Step start and end times
+ * - Step run time in seconds and formatted as HH:MM:SS
+ * - Step results including status code, status details, messages and success indicator bit
+ * - Step command
+ * - Notification details
+ * - Default sort order to make order by easier
+ *
+ * Based on View for SQL Agent Job Histories:
+ * http://www.codeproject.com/Tips/671292/View%ADfor%ADSQL%ADAgent%ADJob%ADHistories
+ *
+ * Change Date   Change By                           Change Description
+ * -----------   -------------                       ---------------------
+ * 6/25/13       Brad Joss (bradjoss@hotmail.com)    Inital Creation
+ * 3/14/16       Jon LaBelle                         Don't lock on system table reads.
+ */
+as
+with jobs
+     as (select j.job_id,
+             sjs.step_id,
+             j.enabled as job_enabled,
+             j.name as job_name,
+             j.description as job_description,
+             sjs.step_name,
+             sjs.command as step_command,
+             sjs.database_name as [database],
+             j.date_created,
+             j.date_modified
+         from msdb..sysjobs as j with (nolock)
+         inner join msdb..sysjobsteps as sjs with (nolock)
+             on sjs.job_id = j.job_id)
+     select j.[database],
+         j.job_name,
+         j.step_name,
+         j.step_id,
+         j.job_enabled,
+         h.exec_dtm,
+         DATEADd(ss, h.run_dur_sec, h.exec_dtm) as end_dtm,
+         h.run_dur_sec,
+         -- Format durations as HH:MM:SS
+         CONVERT(varchar(8), DATEADD(ss, h.run_dur_sec, '1/1/2000'), 108) as run_dur_hhmmss,
+         h.run_status,
+         h.run_status_desc,
+         h.is_success,
+         -- Make filtering easier later on
+         CAST(case
+                  when j.[database] = DB_NAME()
+                      then 1
+                  else 0
+              end as bit) as in_db,
+         -- Remove newline and tab characters so results can easily be pasted
+         -- into Excel for analysis
+         REPLACE(REPLACE(REPLACE(j.job_description, CHAR(10), ' '), CHAR(13), ' '), CHAR(9), ' ') as job_description,
+         REPLACE(REPLACE(REPLACE(j.step_command, CHAR(10), ' '), CHAR(13), ' '), CHAR(9), ' ') as step_command,
+         j.date_created,
+         j.date_modified,
+         REPLACE(REPLACE(REPLACE(h.fmt_message, CHAR(10), ' '), CHAR(13), ' '), CHAR(9), ' ') as message,
+         h.sql_message_id,
+         h.sql_severity,
+         h.operator_id_emailed,
+         h.operator_id_netsent,
+         h.operator_id_paged,
+         h.retries_attempted,
+         j.job_id,
+         -- Default sort order
+         ROW_NUMBER() over(order by j.[database] asc,
+                                    j.job_name asc,
+                                    j.step_id asc,
+                                    h.exec_dtm desc) as sort
+     from jobs as j
+     left outer join dbo.VW_JOBS_HIST_BASE as h
+         on j.job_id = h.job_id
+            and j.step_id = h.step_id;
+go
+-- select * from VW_JOBS_HIST where in_db = 1 order by sort;
+-- go
+--
+-- select *
+-- from VW_JOBS_HIST
+-- where step_name like N'SSIS BM%'
+-- order by exec_dtm desc;
+-- go
+
+if exists (select * from sys.views where object_id = OBJECT_ID(N'[dbo].[VW_JOBS]'))
+    begin
+        drop view dbo.VW_JOBS
+    end;
+go
+
+create view dbo.VW_JOBS
+/**
+ * Name      : dbo.VW_JOBS.sql
+ * Author    : Brad Joss
+ * Purpose   : View to simplify examining SQL Agent Jobs for performance,
+ *             auditing and debugging.
+ *
+ * Displays one row for each job step, aggregating historical information in
+ * line. Key result columns include:
+ *
+ * - Database Name
+ * - Bit flag indicating if job will run against currently selected DB
+ * - Job and Step Names and IDs
+ * - Job created and modified dates
+ * - Bit flag indicating if the job is enabled
+ * - Step command
+ * - First, last and next execution times
+ * - Last execution runtime in seconds and formatted as HH:MM:SS
+ * - Last execution status and message(s)
+ * - Number of schedules created for this job
+ * - Execution total, success and fail counts
+ * - Min, Max, Average and Median runtime durations in seconds and formatted as HH:MM:SS
+ * - Min, Max and Average successful-only runtime durations in seconds and formatted as HH:MM:SS
+ * - If job step is currently running, running Session ID, status and program name
+ * - Checksum of key job details, including Job, Step and DB names, Step Command and step sequence ID
+ *
+ * Based on View for SQL Agent Job Histories:
+ * http://www.codeproject.com/Tips/671292/View%ADfor%ADSQL%ADAgent%ADJob%ADHistories
+ *
+ * Change Date   Change By                           Change Description
+ * -----------   -------------                       --------------------------------------
+ * 6/25/13       Brad Joss (bradjoss@hotmail.com)    Inital Creation
+ * 1/7/14        Brad Joss                           Bug Fix: exec_nbr_desc returns null if no successful runs of
+ *                                                   of the job, and the job step then is filtered off by
+ *                                                   the WHERE exec_nbr_desc = 1 statement.
+ * 3/12/14       Brad Joss                           [msdb].[dbo].[agent_datetime] -- Thanks to Paw Jershauge
+ * 5/30/15       Brad Joss                           [msdb].[dbo].[agent_datetime](NULLIF(next_run_date,0),NULLIF(next_run_time,0)) -- Thanks to Henrik
+ * 3/14/16       Jon LaBelle                         Don't lock on system table reads.
+ */
+as
+with nrt
+     as (
+     -- Get next run time for job based on scheduled times
+     select job_id,
+         MIN(next_run_time) as next_run_time, -- Next run time
+         COUNT(*) as job_schedules -- Count of different schedules there are for this particular job
+     from (
+         -- Convert the msdb formatted time to a standard DateTime
+         select job_id,
+             msdb.dbo.agent_datetime
+         (NULLIF(next_run_date, 0), NULLIF(next_run_time, 0)) as next_run_time
+         from msdb..sysjobschedules
+     ) as t
+     -- We are only interested in future times...
+     where next_run_time > GetDate()
+     group by
+         job_id),
+     cte
+     as (select
+             j.job_id,
+             sjs.step_id,
+             j.enabled,
+             nrt.next_run_time,
+             nrt.job_schedules,
+             j.name as job_name,
+             j.description as job_description,
+             sjs.step_name,
+             sjs.command as step_command,
+             h.exec_dtm,
+             h.run_dur_sec,
+             h.run_status,
+             h.run_status_desc,
+             h.message,
+             sjs.database_name as [database],
+             j.date_created,
+             j.date_modified,
+             -- Format a value so if the job is currently running, we can match
+             -- the job and step name as it would appear in dm_exec_sessions
+             'SQLAgent - TSQL JobStep (Job '+ISNULL(CONVERT(varchar(2000), cast(j.job_id as binary(16)), 1), 'NULL')+' : Step '+CAST(sjs.step_id as varchar(2000))+')' as step_program_name,
+             case
+                 -- If has no history, note that the null record is the "first"
+                 -- record so it will not be filtered off later on.
+                 when h.job_id is null
+                      and h.step_id is null
+                     then 1
+                 else h.step_run_date_desc
+             end as exec_nbr_desc
+         from msdb..sysjobs as j with (nolock)
+         inner join msdb..sysjobsteps as sjs with (nolock)
+             on sjs.job_id = j.job_id
+         left outer join nrt
+             on nrt.job_id = j.job_id
+         left outer join VW_JOBS_HIST_BASE as h
+             on j.job_id = h.job_id
+                and sjs.step_id = h.step_id)
+     select
+         c1.[database] as db,
+         -- To make filtering easier, see if the job is wired to run agains the
+         -- current DB
+         CAST(case
+                  when c1.[database] = DB_NAME()
+                      then 1
+                  else 0
+              end as bit) as in_db,
+         c1.job_name, -- I will assume step name and job name don't have tab/newline chars
+         c1.step_name,
+         c1.step_id,
+         c1.enabled,
+         c1.step_command,
+         c1.run_dur_sec as last_exec_dur_sec,
+         CONVERT(varchar(8), DATEADD(ss, c1.run_dur_sec, '1/1/2000'), 108) as last_exec_dur_hhmmss,
+         c1.run_status as last_exec_status,
+         -- Remove newline and tab chars to make pasting into Excel easier.  I
+         -- would like to do this for c1.step_command too, but I use that in the
+         -- job search function and don't want to corrupt the text value that is
+         -- being searched.
+         REPLACE(REPLACE(REPLACE(hgb.last_message, CHAR(10), ' '), CHAR(13), ' '), CHAR(9), ' ') as last_message,
+         c1.job_schedules,
+         hgb.exec_cnt,
+         hgb.exec_cnt_success,
+         hgb.exec_cnt - hgb.exec_cnt_success as exec_cnt_fail,
+         hgb.first_exec,
+         hgb.last_exec,
+         c1.next_run_time as next_exec,
+         hgb.min_run_dur_sec,
+         hgb.max_run_dur_sec,
+         hgb.avg_run_dur_sec,
+         hgb.med_run_dur_sec,
+         hgb.min_run_dur_success_sec,
+         hgb.max_run_dur_success_sec,
+         hgb.avg_run_dur_success_sec,
+         -- Format times as HH:MM:SS
+         CONVERT(varchar(8), DATEADD(ss, hgb.min_run_dur_sec, '1/1/2000'), 108) as min_run_dur_hhmmss,
+         CONVERT(varchar(8), DATEADD(ss, hgb.max_run_dur_sec, '1/1/2000'), 108) as max_run_dur_hhmmss,
+         CONVERT(varchar(8), DATEADD(ss, hgb.avg_run_dur_sec, '1/1/2000'), 108) as avg_run_dur_hhmmss,
+         CONVERT(varchar(8), DATEADD(ss, hgb.med_run_dur_sec, '1/1/2000'), 108) as med_run_dur_hhmmss,
+         CONVERT(varchar(8), DATEADD(ss, hgb.min_run_dur_success_sec, '1/1/2000'), 108) as min_run_dur_success_hhmmss,
+         CONVERT(varchar(8), DATEADD(ss, hgb.max_run_dur_success_sec, '1/1/2000'), 108) as max_run_dur_success_hhmmss,
+         CONVERT(varchar(8), DATEADD(ss, hgb.avg_run_dur_success_sec, '1/1/2000'), 108) as avg_run_dur_success_hhmmss,
+         c1.date_created as job_created,
+         c1.date_modified as job_modified,
+         c1.job_id,
+         c1.step_program_name,
+         -- If job is currently running, get running details, else will be null
+         ssn.session_id as running_session_id,
+         ssn.status as running_status,
+         -- Compute a checksum that boils down the job step to a hash value
+         CAST(CHECKSUM(ISNULL(c1.[database], '')+'|'+ISNULL(c1.job_name, '')+'|'+ISNULL(c1.step_name, '')+'|'+ISNULL(CAST(c1.step_id as varchar(32)), '')+'|'+ISNULL(c1.step_command, '')) as bigint) as checksum_hash
+     from cte as c1
+     left outer join
+         (
+         -- Aggregate job status for analysis --
+         select
+             h2.job_id,
+             h2.step_id,
+             -- Total execution count
+             count(*) as exec_cnt,
+             -- Successful execution counts
+             SUM(CAST(ISNULL(is_success, 0) as int)) as exec_cnt_success,
+             min(exec_dtm) as first_exec,
+             max(exec_dtm) as last_exec,
+             min(run_dur_sec) as min_run_dur_sec,
+             max(run_dur_sec) as max_run_dur_sec,
+             avg(run_dur_sec) as avg_run_dur_sec,
+             -- Compute the median as the middle value, or in the case of even #
+             -- of records, the average of the two in the middle
+             avg(case
+                     when run_dur_sec is not null
+                          and ABS(h2.step_run_dur_asc - h2.step_run_dur_desc) <= 2
+                         then run_dur_sec
+                     else null
+                 end) as med_run_dur_sec,
+             -- Get min/max/avg value only when the run was successful
+             -- TODO: In 2012, use IIF
+             min(case
+                     when is_success = 1
+                         then run_dur_sec
+                     else null
+                 end) as min_run_dur_success_sec,
+             max(case
+                     when is_success = 1
+                         then run_dur_sec
+                     else null
+                 end) as max_run_dur_success_sec,
+             avg(case
+                     when is_success = 1
+                         then run_dur_sec
+                     else null
+                 end) as avg_run_dur_success_sec,
+             -- Get the message from the last run
+             MAX(case
+                     when step_run_date_desc = 1
+                         then fmt_message
+                     else null
+                 end) as last_message
+         from VW_JOBS_HIST_BASE as h2
+         group by
+             h2.job_id,
+             h2.step_id
+     ) as hgb
+         on c1.job_id = hgb.job_id
+            and c1.step_id = hgb.step_id -- To see if the job step is currently running
+     left outer join sys.dm_exec_sessions as ssn
+         on ssn.program_name = c1.step_program_name
+     where exec_nbr_desc = 1 -- Only get the last run details for each job. Use the _HIST view for full details.
+           or exec_nbr_desc is null; -- Or has not run
+go
+
+-- ============================================================================
+-- Example Usage:
+-- ============================================================================
+-- select job_name,
+--     step_name,
+--     step_id,
+--     first_exec as first_exec_datetime,
+--     last_exec as last_exec_datetime,
+--     exec_cnt,
+--     exec_cnt_success,
+--     exec_cnt_fail,
+--     avg_run_dur_sec,
+--     avg_run_dur_hhmmss,
+--     last_exec_status,
+--     case last_exec_status
+--         when 0
+--             then 'Failed'
+--         when 1
+--             then 'Succeeded'
+--         when 2
+--             then 'Retry'
+--         when 3
+--             then 'Cancelled'
+--         when 4
+--             then null
+--     end as last_exec_status_desc,
+--     last_exec_dur_sec,
+--     last_exec_dur_hhmmss,
+--     min_run_dur_sec,
+--     min_run_dur_success_hhmmss,
+--     max_run_dur_sec,
+--     max_run_dur_hhmmss,
+--     current_datetime = getdate()
+-- from VW_JOBS
+-- where job_name like N'MY_JOB_NAME_FILTER';
+
