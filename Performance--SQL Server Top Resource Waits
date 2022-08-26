@@ -1,0 +1,49 @@
+SQL Server Top Resource Waits
+
+--https://jonlabelle.com/snippets/view/sql/sql-server-top-resource-waits
+
+-- Lists the longest resource waits for a server instance, helping you to locate
+-- bottlenecks
+-- 
+-- Wait statistics are cumulative, and calculated since the last SQL Server
+-- restart or statistics reset.
+-- 
+-- SQL Server collects data for many different wait types; refer to SQL Server
+-- Books Online for more information about each wait type.
+-- 
+-- For example, if the top wait types are disk I/O related, you could use
+-- Dynamic Management Views (DMVs) such as sys.dm_io_pending_io_requests and
+-- sys.dm_io_virtual_file_stats to analyse the problem in more detail.
+-- 
+-- You can specify a Wait time limit (%) before you run the script (default 1%).
+-- Only wait types with values higher than the percentage you specify will be
+-- listed.
+
+declare @wait_time_limit int;
+set @wait_time_limit = 1;
+
+with Waits
+    as (select
+            wait_type,
+            wait_time_ms / 1000. as wait_time_sec,
+            100. * wait_time_ms / sum(wait_time_ms) over() as pct,
+            row_number() over(order by wait_time_ms desc) as rn
+        from sys.dm_os_wait_stats
+        where wait_type not in(
+            'CLR_SEMAPHORE', 
+            'LAZYWRITER_SLEEP', 
+            'RESOURCE_QUEUE', 
+            'SLEEP_TASK', 
+            'SLEEP_SYSTEMTASK', 
+            'SQLTRACE_BUFFER_FLUSH', 
+            'WAITFOR', 
+            'LOGMGR_QUEUE', 
+            'CHECKPOINT_QUEUE'))
+    select
+        wait_type as [Wait Type],
+        cast(wait_time_sec as decimal(12, 2)) as [Wait Time (s)],
+        cast(pct as decimal(12, 2)) as [Wait Time (%)]
+    from Waits
+    where pct > @wait_time_limit
+    order by
+        wait_time_sec desc;
