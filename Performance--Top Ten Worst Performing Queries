@@ -1,0 +1,86 @@
+Top Ten Worst Performing Queries
+--https://jonlabelle.com/snippets/view/sql/top-ten-worst-performing-queries
+
+-- Hardware performance bottlenecks
+--
+-- Memory
+--
+-- Memory affects SQL Server performance more than any other piece of hardware.
+-- Therefore, it is necessary to monitor memory usage regularly on SQL Server
+-- systems to ensure that the percentage of memory available is higher than 20%.
+-- If users are experiencing performance issues and the percentage of available
+-- memory drops below 20%, then the problem is insufficient memory allocation.
+-- Keep an eye on the average page life expectancy performance counter and make
+-- sure it is always above 300 seconds (5 minutes). Anything less indicates
+-- either poor index design leading to increased disk input/output (I/O) and
+-- less effective use of memory or an actual shortage of memory. Monitor the
+-- paging rates on the SQL Server system, and make sure they are regularly above
+-- 1,000 pages per second. Check the PerfMon object MSSQL Buffer Manager and the
+-- Memory Performance Counters.
+--
+-- Also, monitor the counter, Memory Grants Pending in PerfMon object SQL Server
+-- Memory Manager Counters. This counter indicates the total number of processes
+-- per second waiting for a workspace memory grant. Typically, small OLTP
+-- transactions do not require large memory grants. Anything greater than a
+-- memory grant of zero for an OLTP transaction indicates low memory in a SQL
+-- Server system.
+
+-- One way to handle memory bottlenecks is to find memory-intensive processes,
+-- which can be used to identify potential application problems such as memory
+-- leaks. You can also review queries to optimize performance to consume less
+-- memory. Another approach is to scale up the SQL Server environment by adding
+-- more physical memory (RAM) to the SQL Server. Scaling up is usually a good
+-- approach to address any performance bottleneck related to memory.
+--
+-- Disk I/O use
+--
+-- Compared to other hardware resources, storage input/output is usually the
+-- slowest of the system resources in SQL Server. Therefore, it is important to
+-- monitor the storage system to see if storage has become a performance
+-- bottleneck. If it has, the next step is to investigate whether or not you can
+-- optimize the design and configuration of the storage system to achieve
+-- scalability and high performance. Review the PerfMon disk counters for
+-- Average Disk Sec/Read and Average Disk Sec/Write. Make sure that the time a
+-- read or write takes is, ideally, less than 12 milliseconds for OLTP systems
+-- and higher for decision support systems.
+--
+-- As with memory, the easiest way to solve a disk I/O performance bottleneck is
+-- to scale up the SQL Server environment by replacing existing disks with
+-- faster disks that can better cope with the I/O load and that distribute the
+-- I/O load across multiple spindles. Also, defragment the data disk regularly.
+--
+-- CPU
+--
+-- CPU performance bottlenecks occur for a variety of reasons. They include
+-- having a non-optimal query plan, an inadequate design application or database
+-- design, poor SQL Server configuration or a lack of hardware resources. Review
+-- the PerfMon operation system CPU and processor counters for Processor Queue
+-- Length to verify that the number of threads waiting for CPU cycles is eight
+-- or less. If this number is greater than 12, it means that the CPU is causing
+-- the performance issue.
+--
+-- Once you have identified a CPU bottleneck, use sys.dm_os_wait_stats dynamic
+-- management view (DMV) to identify the top ten worst-performing queries for
+-- the CPU, as shown below.
+--
+-- http://searchsqlserver.techtarget.com/tip/Five-tips-to-avoid-a-performance-bottleneck-or-other-SQL-Server-snares
+--
+
+-- To identify the top ten worst-performing queries for the CPU:
+select top 10
+    (a.total_worker_time / a.execution_count) as [Avg_CPU_Time],
+    Convert(varchar, Last_Execution_Time) as [Last_Execution_Time],
+    Total_Physical_Reads,
+    SUBSTRING(b.text, a.statement_start_offset / 2, (
+            case
+                when a.statement_end_offset = - 1
+                    then len(convert(nvarchar(max), b.text)) * 2
+                else a.statement_end_offset
+                end - a.statement_start_offset
+            ) / 2) as [Query_Text],
+    dbname = Upper(db_name(b.dbid)),
+    b.objectid as 'Object_ID',
+    B.*
+from sys.dm_exec_query_stats a
+cross apply sys.dm_exec_sql_text(a.sql_handle) as b
+order by [Avg_CPU_Time] desc;
