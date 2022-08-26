@@ -1,0 +1,77 @@
+T-SQL Windows Group Memberships
+--https://jonlabelle.com/snippets/raw/632/t-sql-windows-group-memberships.sql
+
+/* -----------------------------------------------------
+SQL Server - Windows Group Membership Checker
+
+A script to reveal which accounts have access to your SQL Server via Windows
+Groups. If you use Windows Authentication and have Windows groups as log-ins
+this script can help by revealing members of Windows Groups, and their current
+permissions. This is particularly handy if you're not the network administrator,
+or don't have access to the Active Directory tools.
+----------------------------------------------------- */
+
+declare @CurrentRow int;
+declare @TotalRows int;
+
+set @CurrentRow = 1;
+
+declare @SqlGroupMembership table(
+    ACCOUNT_NAME sysname,
+    ACCOUNT_TYPE varchar(30),
+    ACCOUNT_PRIVILEGE varchar(30),
+    MAPPED_LOGIN_NAME sysname,
+    PERMISSION_PATH sysname
+);
+
+declare @WindowsGroupsOnServer table
+(
+    UniqueRowID int identity(1, 1) primary key not null,
+    Name sysname
+);
+
+insert into @WindowsGroupsOnServer(NAME)
+    select NAME
+    from master.sys.server_principals
+    where TYPE = 'G';
+
+select @TotalRows = max(UniqueRowID)
+from @WindowsGroupsOnServer;
+
+declare @WindowsGroupName sysname;
+
+-- Loop Each Windows Group present on the server
+while @CurrentRow <= @TotalRows
+    begin
+        select @WindowsGroupName = Name
+        from @WindowsGroupsOnServer
+        where UniqueRowID = @CurrentRow;
+
+        begin try
+            -- Insert found logins into table variable
+            insert into @SqlGroupMembership(
+                ACCOUNT_NAME,
+                ACCOUNT_TYPE,
+                ACCOUNT_PRIVILEGE,
+                MAPPED_LOGIN_NAME,
+                PERMISSION_PATH)
+            exec xp_logininfo @WindowsGroupName, 'members';
+        end try
+
+        begin catch
+            -- No action for if xp_logininfo fails
+        end catch;
+
+        select @CurrentRow = @CurrentRow + 1;
+    end;
+
+-- Display final results
+select
+    @@servername    as Servername,
+    PERMISSION_PATH as WindowsGroup,
+    Account_Name,
+    Mapped_Login_Name,
+    Account_Type,
+    Account_Privilege
+from @SqlGroupMembership
+order by PERMISSION_PATH, ACCOUNT_NAME;
