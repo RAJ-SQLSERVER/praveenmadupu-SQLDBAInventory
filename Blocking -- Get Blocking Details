@@ -1,0 +1,62 @@
+Get Blocking Details
+
+--https://jonlabelle.com/snippets/view/sql/get-blocking-details
+
+select Sess.Session_id,
+    Req.blocking_session_id,
+    case
+        when Req2.session_id is not null
+             and (sess.session_id is null
+                  or Req.blocking_session_id = 0
+                  or req.blocking_session_id is null)
+            then 1
+        else 0
+    end as IsHeadBlocker,
+    tasks.scheduler_id as CPU_ID,
+    Sess.login_time,
+    Sess.login_name,
+    Sess.host_name,
+    Sess.program_name,
+    Req.request_id,
+    Req.status as Request_Session,
+    DB_Name(Req.database_id) as DBName,
+    Req.command,
+    Req.wait_type as Req_wait_type,
+    Req.Wait_time as Req_Wait_time,
+    Req.wait_resource as Req_wait_Resource,
+    Req.total_elapsed_time / (1000 * 60) as [Request_time_Total(Mins)],
+    case Req.transaction_isolation_level
+        when 0
+            then 'Unspecified'
+        when 1
+            then 'ReadUncomitted'
+        when 2
+            then 'ReadCommitted'
+        when 3
+            then 'Repeatable'
+        when 4
+            then 'Serializable'
+        when 5
+            then 'Snapshot'
+        else 'UNKNOWN'
+    end as transaction_isolation_level,
+    DB_NAME(Txt.dbid)+'..'+OBJECT_NAME(Txt.objectid, Txt.dbid) as Running_ObjectName,
+    REPLACE(REPLACE(REPLACE(REPLACE(LEFT(Txt.Text, 500), char(13)+char(10), '  '), char(10), ' '), CHAR(13), ' '), CHAR(9), ' ') as Full_Text,
+    REPLACE(REPLACE(REPLACE(REPLACE(LEFT(SUBSTRING(Txt.text, Req.statement_start_offset/2+1, (
+        case
+            when Req.statement_end_offset = -1
+                then LEN(CONVERT(nvarchar(max), Txt.text))*2
+            else Req.statement_end_offset
+        end-Req.statement_start_offset)/2+1), 500), char(13)+char(10), '  '), char(10), ' '), CHAR(13), ' '), CHAR(9), ' ')
+    as Running_Text
+from sys.dm_exec_requests as Req
+inner join sys.dm_exec_sessions as Sess
+    on Req.session_id = Sess.session_id
+inner join sys.dm_os_tasks as tasks
+    on req.session_id = tasks.session_id
+inner join sys.dm_exec_connections as Conn
+    on Sess.session_id = Conn.session_id
+left join sys.dm_exec_requests as Req2
+    on Sess.session_id = Req2.blocking_session_id
+outer apply sys.dm_exec_sql_text (Conn.most_recent_sql_handle) as Txt
+where Sess.session_id > 50;
