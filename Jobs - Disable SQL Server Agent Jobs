@@ -1,0 +1,71 @@
+Disable SQL Server Agent Jobs
+SQL Server Agent statement that will disable (or enable) the specified jobs by name or category.
+
+--https://jonlabelle.com/snippets/view/sql/disable-sql-server-agent-jobs
+
+if OBJECT_ID('tempdb..#disable_jobs') is not null
+    begin
+        drop table #disable_jobs;
+    end;
+
+--
+-- Store jobs in temp table:
+create table #disable_jobs (disable_job_name sysname not null);
+
+-- --------------------------
+-- by name (option 1)
+-- --------------------------
+insert into #disable_jobs
+select J.name
+from msdb..sysjobs as J
+inner join msdb..syscategories as C
+    on J.category_id = C.category_id
+where J.name like N'%<JOB_NAME>%'; -- Replace "<JOB_NAME>" with your Job Name
+
+-- --------------------------
+-- or by category (option 2)
+-- --------------------------
+insert into #disable_jobs
+select J.name
+from msdb..sysjobs as J
+inner join msdb..syscategories as C
+    on J.category_id = C.category_id
+where C.name = N'<JOB_CATEGORY_NAME>'; -- Replace "<JOB_CATEGORY_NAME>" with your Job Name
+
+--
+-- Iterate over jobs, disabling each one in the temp table:
+declare @job_name sysname;
+declare @job_id uniqueidentifier;
+
+declare disable_jobs cursor
+    for select disable_job_name from #disable_jobs;
+
+set @job_id = null;
+
+open disable_jobs;
+fetch next from disable_jobs into @job_name;
+while @@FETCH_STATUS = 0
+    begin
+        exec msdb..sp_verify_job_identifiers
+            '@job_name',
+            '@job_id',
+            @job_name output,
+            @job_id output;
+
+        print N'Disabling Job '''+cast(@job_name as nvarchar(255))+'''';
+        exec msdb..sp_update_job
+            @job_id,
+            @enabled = 0; -- 0 = disabled, 1 = enabled
+
+        set @job_id = null;
+
+        fetch next from disable_jobs into @job_name;
+    end;
+close disable_jobs;
+deallocate disable_jobs;
+
+if OBJECT_ID('tempdb..#disable_jobs') is not null
+    begin
+        drop table #disable_jobs;
+    end;
+
