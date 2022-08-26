@@ -1,0 +1,24 @@
+Get Currently Running SQL Server Agent Jobs
+
+--https://jonlabelle.com/snippets/view/sql/get-currently-running-sql-server-agent-jobs
+
+select ja.job_id,
+    j.name as job_name,
+    ja.start_execution_date,
+    ISNULL(last_executed_step_id, 0) + 1 as current_executed_step_id,
+    Js.step_name
+from msdb.dbo.sysjobactivity as ja
+left join msdb.dbo.sysjobhistory as jh
+    on ja.job_history_id = jh.instance_id
+join msdb.dbo.sysjobs as j
+    on ja.job_id = j.job_id
+join msdb.dbo.sysjobsteps as js
+    on ja.job_id = js.job_id
+       and ISNULL(ja.last_executed_step_id, 0) + 1 = js.step_id
+where ja.session_id = (select top 1
+                           session_id
+                       from msdb.dbo.syssessions
+                       order by
+                           agent_start_date desc)
+      and start_execution_date is not null
+      and stop_execution_date is null;
