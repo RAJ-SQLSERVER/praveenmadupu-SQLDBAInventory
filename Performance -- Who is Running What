@@ -1,0 +1,42 @@
+Who is Running What
+--https://jonlabelle.com/snippets/view/sql/who-is-running-what
+
+-- Who is Running What?
+-- 
+-- Lists each session running on an instance, including login, query, and status
+-- information
+-- 
+-- This script provides a quick overview of who is currently running commands on
+-- a SQL Server instance. The exact command being run is listed (for example, a
+-- SELECT, UPDATE, INSERT, or BACKUP DATABASE statement), with the associated
+-- user login.
+-- 
+-- Additional information includes the session status (Background, Running,
+-- Runnable, Sleeping, or Suspended), and the database name.
+-- 
+-- The Session ID is also shown; this is useful if you need to terminate a user
+-- process using the KILL command.
+-- 
+-- Note that the user login shown for a session may be different to the user
+-- login that originally created the session. This can happen if the session has
+-- been subject to context switches (using the 'EXECUTE AS' command, for
+-- example).
+
+select
+    des.login_name as Login,
+    der.command as Command,
+    dest.text as [Command Text],
+    des.login_time as [Login Time],
+    des.host_name as Hostname,
+    des.program_name as Program,
+    der.session_id as [Session ID],
+    dec.client_net_address as [Client Net Address],
+    der.status as Status,
+    db_name(der.database_id) as [Database Name]
+from sys.dm_exec_requests as der
+     inner join sys.dm_exec_connections as dec
+         on der.session_id = dec.session_id
+     inner join sys.dm_exec_sessions as des
+         on des.session_id = der.session_id
+     cross apply sys.dm_exec_sql_text(sql_handle) as dest
+where des.is_user_process = 1;
