@@ -1,0 +1,73 @@
+Show Running Queries
+--https://jonlabelle.com/snippets/view/sql/show-running-queries
+
+This query provides information about queries currently in execution, useful typically when SQL Server is processing batches of long-running queries. It augments the information available from the SQL activity monitor with the text and line number of the current statement in each batch, includes information about tempdb utilisation, and provides a link to the query execution plan (if available).
+Some additional notes:
+UserObjMB typically relates to storage explicitly requested by the user (e.g. in temporary tables). The asterisk is intended to indicate that this is not always reliable - deferred deallocation in tempdb can make this appear to be higher than is the case.
+InternalObjMB relates to storage used by the database engine in evaluating the batch (e.g. hash buckets, temporary sort runs etc)
+The link to the query plan may be null if the plan is no longer in the cache or if the plan is too complex. In the latter case a text plan may still be available and can be obtained using the commented-out OUTER APPLY sys.dm_exec_text_query_plan.
+The purpose of the NOT LIKE '%9ow34ytghehl3q94wg%' clause is to exclude this query from the output!
+
+with cte
+    as (select
+            r.session_id,
+            r.request_id,
+            r.database_id,
+            t.objectid,
+            t.text,
+            r.statement_start_offset / 2 as StatementStartOffset,
+            case
+              when r.statement_end_offset > r.statement_start_offset
+                then r.statement_end_offset / 2
+              else len(t.text)
+            end as StatementEndOffset,
+            p.query_plan
+        from sys.dm_exec_requests as r
+             cross apply sys.dm_exec_sql_text(r.sql_handle) as t
+                outer apply sys.dm_exec_query_plan(r.plan_handle) as p
+        --OUTER APPLY sys.dm_exec_text_query_plan(r.plan_handle, r.statement_end_offset, r.statement_end_offset) p
+        where r.sql_handle is not null
+        and t.text not like '%9ow34ytghehl3q94wg%'), spaceUsage
+    as (select
+            session_id,
+            request_id,
+            sum(user_objects_alloc_page_count - user_objects_dealloc_page_count) / 128 as UserObjMB,
+            sum(internal_objects_alloc_page_count - internal_objects_dealloc_page_count) / 128 as InternalObjMB
+        from sys.dm_db_task_space_usage
+        group by session_id, request_id)
+    select
+        r.session_id,
+        s.login_name,
+        db_name(r.database_id) as DbName,
+        coalesce('[' + object_schema_name(r.objectid, r.database_id) + '].[' + object_name(r.objectid, r.database_id) + ']', left(ltrim(r.text), 128)) as QueryBatch,
+        substring(r.text, r.StatementStartOffset, r.StatementEndOffset - r.StatementStartOffset) as CurrentStatement,
+        len(left(r.text, r.StatementStartOffset)) - len(replace(left(r.text, r.StatementStartOffset), char(10), '')) + 1 as LineNumber,
+        u.UserObjMB as [UserObjMB*],
+        u.InternalObjMB,
+        r.query_plan
+    from cte as r
+         inner join sys.dm_exec_sessions as s
+             on s.session_id = r.session_id
+         left join spaceUsage as u
+             on
+        r.session_id = u.session_id
+    and r.request_id = u.request_id;
+
+/*--------------------------------------------------------------------
+UNION ALL
+
+SELECT
+  9999
+, NULL
+, 'tempdb'
+, CAST(SUM(unallocated_extent_page_count)/128 AS VARCHAR) + ' MB free'
+, NULL
+, NULL
+, SUM(user_object_reserved_page_count) / 128
+, SUM(internal_object_reserved_page_count) / 128
+, NULL
+FROM tempdb.sys.dm_db_file_space_usage
+
+ORDER BY 1
+--
+--------------------------------------------------------------------*/
