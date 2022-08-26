@@ -1,0 +1,55 @@
+Get Stored Procedure Statistics
+--https://jonlabelle.com/snippets/view/sql/get-stored-procedure-statistics
+
+--
+-- Get Stored Procedure Statistics (1)
+--
+-- Name, Schema, Last Execution Time, Modify Date, Create Date and Execution
+-- count since reboot.
+
+select db_name(proc_stats.database_id) as dbname,
+    sc.name as [schema],
+    obj.name,
+    proc_stats.last_execution_time,
+    obj.modify_date,
+    obj.create_date,
+    proc_stats.execution_count
+from sys.dm_exec_procedure_stats as proc_stats
+inner join sys.objects as obj
+    on obj.object_id = proc_stats.object_id
+inner join sys.schemas as sc
+    on obj.schema_id = sc.schema_id
+where obj.type = 'P'
+order by dbname,
+    sc.name,
+    obj.name;
+
+--
+-- Get Stored Procedure Statistics (2)
+--
+-- You can look in the plan cache to get a pretty good idea of Stored Procedure
+-- usage. Take this query, for instance:
+
+select
+    db_name(st.dbid) as database_name,
+    object_name(st.objectid) as name,
+    p.usecounts,
+    p.size_in_bytes / 1024 as size_in_kb,
+    st.text,
+    p.objtype
+from sys.dm_exec_cached_plans as p
+     cross apply sys.dm_exec_sql_text(p.plan_handle) as st
+where
+    p.objtype = 'Proc'
+and st.dbid = db_id('DATABASE_NAME_HERE')
+order by p.usecounts desc;
+
+-- This will give you the "usecounts" of the stored procedures that are cached
+-- pertaining to SomeDB.
+--
+-- Note: the plan cache contains the execution plans. This retention of these
+-- plans has many factors involved. Whereas this will give you a good idea of
+-- what is being used and how often, it's definitely not the running total of
+-- stored procedures and how often/when they were executed.
+--
+-- http://dba.stackexchange.com/questions/16493/tracking-stored-procedure-usage
