@@ -1,0 +1,38 @@
+Enable Transparent Data Encryption in SQL Server
+
+--https://jonlabelle.com/snippets/view/sql/enable-transparent-data-encryption-in-sql-server
+
+/* *************************************** Step 1 ************************************************
+Create a Master Key.The database master key is a symmetric key used to protect the private keys of
+certificates and asymmetric keys that are present in the database.
+************************************************************************************************ */
+
+USE [master];
+
+CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'P@ssw0rd';
+
+/* *************************************** Step 2 ************************************************
+Create a Certificate. CREATE CERTIFICATE can load a certificate from a file or assembly. It can
+also be used to create a self signed certificate.
+************************************************************************************************ */
+
+CREATE CERTIFICATE AdventureWorksTDECert
+    WITH SUBJECT = 'ADWorksTDE';
+
+/* *************************************** Step 3 ************************************************
+Create a Database Encryption Key.A database encryption key is required before a database can be
+encrypted by using Transparent Database Encryption (TDE).
+************************************************************************************************ */
+
+USE [AdventureWorks2012];
+
+CREATE DATABASE ENCRYPTION KEY
+    WITH ALGORITHM = AES_256
+    ENCRYPTION BY SERVER CERTIFICATE [AdventureWorksTDECert];
+
+/* *************************************** Step 4 ************************************************
+Encrypt database.
+************************************************************************************************ */
+
+ALTER DATABASE [AdventureWorks2012]
+    SET ENCRYPTION ON;
