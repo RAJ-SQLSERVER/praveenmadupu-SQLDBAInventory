@@ -1,0 +1,9 @@
+Time Zone Information in SQL Server
+
+-- https://jonlabelle.com/snippets/view/sql/get-time-zone-information-in-sql-server
+
+select [name] time_zone_name,
+    current_utc_offset,
+    is_currently_dst
+from sys.time_zone_info
+order by current_utc_offset;
