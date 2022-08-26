@@ -1,0 +1,146 @@
+Find Long Running SQL Agent Jobs
+
+--https://jonlabelle.com/snippets/view/sql/find-long-running-sql-agent-jobs
+
+--
+-- Determine How Long Active SQL Server Agent Job Has Been Running
+-- http://stackoverflow.com/a/10726791
+
+select
+    sj.name as JobName,
+    DATEDIFF(minute, sja.start_execution_date, GetDate()) as MinutesRunning
+from msdb..sysjobactivity as sja
+join msdb..sysjobs as sj
+    on sj.job_id = sja.job_id
+where sja.stop_execution_date is null -- job hasn't stopped running
+  and sja.start_execution_date is not null -- job is currently running
+  and sj.name like N'%job_name_here%'
+  and not exists(
+      -- make sure this is the most recent run
+      select 1
+      from msdb..sysjobactivity as new
+      where new.job_id = sja.job_id
+        and new.start_execution_date > sja.start_execution_date);
+
+-- or...
+
+-- Get all jobs... unfiltered.
+
+select sj.name as JobName,
+    DATEDIFF(minute, sja.start_execution_date, GETDATE()) as MinutesRunning
+from msdb.dbo.sysjobactivity as sja
+inner join msdb.dbo.sysjobs as sj
+    on sja.job_id = sj.job_id
+where CONVERT(date, sja.start_execution_date) = CONVERT(date, GETDATE())
+    and sja.stop_execution_date is null;
+
+/* ----------------------------------------------------------------------------
+
+Find Currently Long Running SQL Agent Jobs
+
+This script will check to see if any currently running jobs are running long.
+
+Variables:
+    @MinHistExecutions  - Minimum number of job executions we want to consider
+    @MinAvgSecsDuration - Threshold for minimum job duration we care to monitor
+    @HistoryStartDate   - Start date for historical average
+    @HistoryEndDate     - End date for historical average
+
+These variables allow for us to control a couple of factors. First we can focus
+on jobs that are running long enough on average for us to be concerned with
+(say, 30 seconds or more).
+
+Second, we can avoid being alerted by jobs that have run so few times that the
+average and standard deviations are not quite stable yet.
+
+This script leaves these variables at 1.0, but I would advise you alter them
+upwards after testing.
+
+Returns: One result set containing a list of jobs that are currently running and
+are running longer than two standard deviations away from their historical
+average. The "Min Threshold" column represents the average plus two standard
+deviations.
+
+Compatiblity: SQL2005, SQL2008, SQL2008R2, SQL2012, SQL2014
+
+Author:  Thomas LaRock, http://thomaslarock.com/contact-me/
+Date:    August 19th, 2014
+Article: http://thomaslarock.com/2014/08/find-currently-running-long-sql-agent-jobs/
+
+You may alter this code for your own purposes. You may republish altered code as
+long as you give due credit.
+
+THIS CODE AND INFORMATION IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+EITHER EXPRESSED OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE IMPLIED WARRANTIES
+OF MERCHANTABILITY AND/OR FITNESS FOR A PARTICULAR PURPOSE.
+----------------------------------------------------------------------------- */
+
+declare @HistoryStartDate datetime,
+    @HistoryEndDate datetime,
+    @MinHistExecutions int,
+    @MinAvgSecsDuration int;
+
+set @HistoryStartDate = '19000101';
+set @HistoryEndDate = GETDATE();
+set @MinHistExecutions = 1.0;
+set @MinAvgSecsDuration = 1.0;
+
+declare @currently_running_jobs table(
+    job_id uniqueidentifier not null,
+    last_run_date int not null,
+    last_run_time int not null,
+    next_run_date int not null,
+    next_run_time int not null,
+    next_run_schedule_id int not null,
+    requested_to_run int not null,
+    request_source int not null,
+    request_source_id sysname null,
+    running int not null,
+    current_step int not null,
+    current_retry_attempt int not null,
+    job_state int not null
+);
+
+--capture details on jobs
+insert into @currently_running_jobs
+    execute master.dbo.xp_sqlagent_enum_jobs 1, '';
+
+with JobHistData as (
+    select job_id,
+        date_executed = msdb.dbo.agent_datetime(run_date, run_time),
+        secs_duration = run_duration / 10000 * 3600 + run_duration % 10000 / 100 * 60 + run_duration % 100
+    from msdb.dbo.sysjobhistory
+    where step_id = 0 --Job Outcome
+        and run_status = 1 --Succeeded
+    ), JobHistStats as (
+    select job_id,
+        AvgDuration = AVG(secs_duration * 1.),
+        AvgPlus2StDev = AVG(secs_duration * 1.) + 2 * stdevp(secs_duration)
+             from JobHistData
+             where date_executed >= DATEADD(day, DATEDIFF(day, '19000101', @HistoryStartDate), '19000101')
+               and date_executed < DATEADD(day, 1 + DATEDIFF(day, '19000101', @HistoryEndDate), '19000101')
+             group by job_id
+             having COUNT(*) >= @MinHistExecutions
+                and AVG(secs_duration * 1.) >= @MinAvgSecsDuration)
+     select jd.job_id,
+         j.name as JobName,
+         MAX(act.start_execution_date) as ExecutionDate,
+         AvgDuration as [Historical Avg Duration (secs)],
+         AvgPlus2StDev as [Min Threshhold (secs)]
+     from JobHistData as jd
+     join JobHistStats as jhs
+         on jd.job_id = jhs.job_id
+     join msdb..sysjobs as j
+         on jd.job_id = j.job_id
+     join @currently_running_jobs as crj
+         on crj.job_id = jd.job_id
+     join msdb..sysjobactivity as act
+         on act.job_id = jd.job_id
+        and act.stop_execution_date is null
+        and act.start_execution_date is not null
+     where DATEDIFF(SS, act.start_execution_date, GETDATE()) > AvgPlus2StDev
+       and crj.job_state = 1 -- comment this line if you want to report on all jobs
+     group by jd.job_id,
+         j.name,
+         AvgDuration,
+         AvgPlus2StDev;
