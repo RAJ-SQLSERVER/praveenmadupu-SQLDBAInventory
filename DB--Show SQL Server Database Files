@@ -1,0 +1,156 @@
+Show SQL Server Database Files
+--https://jonlabelle.com/snippets/view/sql/show-sql-server-database-files
+
+-- Database Files and Space Used
+-- 
+-- Lists the database files that comprise a single database, including their
+-- size, and space used.
+-- 
+-- You can use this script to:
+-- 
+-- * see all the data files and log files that the database uses, in a single
+--   report
+-- * check which file group each data file is in
+-- * check the logical and physical (OS) file names for each database file
+-- * check the total size of each database file, and the amount of space
+--   currently used (in Megabytes, and as a percentage)
+-- * check the growth settings for each database file (maximum size, and
+--   autogrowth increment)
+-- 
+-- This information can help you understand how your database is utilising disk
+-- space, and to assess how much growth is possible.
+
+set nocount on;
+
+create table #Data(
+    FileID int not null,
+    FileGroupId int not null,
+    TotalExtents int not null,
+    UsedExtents int not null,
+    FileName sysname not null,
+    FilePath nvarchar(max) not null,
+    FileGroup varchar(max) null);
+
+create table #Results(
+    db sysname null,
+    FileType varchar(4) not null,
+    FileGroup sysname not null,
+    FileName sysname not null,
+    TotalMB numeric(18, 2) not null,
+    UsedMB numeric(18, 2) not null,
+    PctUsed numeric(18, 2) null,
+    FilePath nvarchar(max) null,
+    FileID int null);
+
+create table #Log(
+    db sysname not null,
+    LogSize numeric(18, 5) not null,
+    LogUsed numeric(18, 5) not null,
+    Status int not null,
+    FilePath nvarchar(max) null);
+
+insert into #Data(
+    FileID,
+    FileGroupId,
+    TotalExtents,
+    UsedExtents,
+    FileName,
+    FilePath)
+exec ('DBCC showfilestats WITH NO_INFOMSGS');
+
+update #Data set
+    #Data.FileGroup = sysfilegroups.groupname
+from #Data, sysfilegroups
+where
+    #Data.FileGroupId = sysfilegroups.groupid;
+
+insert into #Results(
+    db,
+    FileGroup,
+    FileType,
+    FileName,
+    TotalMB,
+    UsedMB,
+    PctUsed,
+    FilePath,
+    FileID)
+select
+    db_name() as db,
+    FileGroup,
+    'Data' as FileType,
+    FileName,
+    TotalExtents * 64. / 1024. as TotalMB,
+    UsedExtents * 64. / 1024 as UsedMB,
+    UsedExtents * 100. / TotalExtents as UsedPct,
+    FilePath,
+    FileID
+from #Data
+order by --1,2
+    DB_NAME(), FileGroup;
+
+insert into #Log(
+    db,
+    LogSize,
+    LogUsed,
+    Status)
+exec ('dbcc sqlperf(logspace) WITH NO_INFOMSGS ');
+
+insert into #Results(
+    db,
+    FileGroup,
+    FileType,
+    FileName,
+    TotalMB,
+    UsedMB,
+    PctUsed,
+    FilePath,
+    FileID)
+select
+    db_name() as db,
+    'Log' as FileGroup,
+    'Log' as FileType,
+    s.name as FileName,
+    s.Size / 128. as LogSize,
+    fileproperty(s.name, 'spaceused') / 8.00 / 16.00 as LogUsedSpace,
+    ((fileproperty(s.name, 'spaceused') / 8.00 / 16.00) * 100) / (s.Size / 128.) as UsedPct,
+    s.FileName as FilePath,
+    s.FileID as FileID
+from #Log as l, master.dbo.sysaltfiles as f, dbo.sysfiles as s
+where
+    f.dbid = db_id()
+and s.status&0x40 <> 0
+and s.FileID = f.FileID
+and l.db = db_name();
+
+select
+    r.db as "Database",
+    r.FileType as "File type",
+    case
+      when r.FileGroup = 'Log'
+        then 'N/A'
+      else r.FileGroup
+    end as "File group",
+    r.FileName as "Logical file name",
+    r.TotalMB as "Total size (MB)",
+    r.UsedMB as "Used (MB)",
+    r.PctUsed as "Used (%)",
+    r.FilePath as "File name",
+    r.FileID as "File ID",
+    case
+      when s.maxsize = -1
+        then null
+      else convert(decimal(18, 2), s.maxsize / 128.)
+    end as "Max. size (MB)",
+    convert(decimal(18, 2), s.growth / 128.) as "Autogrowth increment (MB)"
+from #Results as r
+     inner join dbo.sysfiles as s
+         on r.FileID = s.FileID
+order by
+    1, 2, 3, 4, 5;
+
+drop table
+    #Data;
+drop table
+    #Results;
+drop table
+    #Log;
