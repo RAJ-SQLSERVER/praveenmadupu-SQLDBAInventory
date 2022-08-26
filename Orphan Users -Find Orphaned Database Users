@@ -1,0 +1,21 @@
+Find Orphaned Database Users
+
+--https://jonlabelle.com/snippets/view/sql/find-orphaned-database-users
+
+--
+-- Find Orphan users for each database in a given SQL Instance
+--
+
+create table #Orphanusers(
+    DBname sysname default DB_Name(),
+    username varchar(1000),
+    usersid varbinary(1000)
+);
+
+exec master..sp_msforeachdb N'use [?]
+Insert into #orphanusers(username, usersid)
+exec sp_change_users_login report';
+
+select * from #Orphanusers order by DBname asc;
+
+drop table #Orphanusers;
