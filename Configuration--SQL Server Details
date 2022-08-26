@@ -1,0 +1,89 @@
+SQL Server Details
+--https://jonlabelle.com/snippets/view/sql/sql-server-details
+
+-- ============================================================================
+-- SQL Server Details
+--
+-- ## SQL Product Version to Product Name Mapping:
+--
+-- | Version Pattern |    Product Name    |
+-- |-----------------|--------------------|
+-- | 14.0.x.x        | SQL Server 2017    |
+-- | 13.0.x.x        | SQL Server 2016    |
+-- | 12.0.x.x        | SQL Server 2014    |
+-- | 11.0.x.x        | SQL Server 2012    |
+-- | 10.50.x.x       | SQL Server 2008 R2 |
+-- | 10.00.x.x       | SQL Server 2008    |
+-- | 9.00.x.x        | SQL Server 2005    |
+-- | 8.00.x.x        | SQL Server 2000    |
+--
+-- Source: *How to determine the version and edition of SQL Server and its
+-- components* (https://support.microsoft.com/en-us/kb/321185)
+-- ============================================================================
+
+--
+-- Get software and version info line:
+declare @sqlVersion nvarchar(400);
+set @sqlVersion = @@version;
+set @sqlVersion = ltrim(rtrim(left(@sqlVersion, CHARINDEX(char(9), @sqlVersion) - 1))); -- only grab the first line
+set @sqlVersion = ltrim(rtrim(replace(replace(@sqlVersion, char(13), ''), char(10), ''))); -- strip line endings
+
+--
+-- Try to get the system configured timezone:
+declare @TimeZone varchar(50);
+begin try
+    exec master.dbo.xp_regread 'HKEY_LOCAL_MACHINE',
+        'SYSTEM\CurrentControlSet\Control\TimeZoneInformation',
+        'TimeZoneKeyName',
+        @TimeZone out;
+end try
+begin catch
+    set @TimeZone = 'Unknown';
+end catch;
+
+--
+-- Main
+-- =========================================================================
+
+select
+    SERVERPROPERTY('MachineName') as 'Hostname',
+    SERVERPROPERTY('ServerName') as 'ServerName',
+    @sqlVersion as 'SQLServerVersion',
+    "EngineEdition" = case SERVERPROPERTY('EngineEdition')
+                          when 1 then 'Desktop'
+                          when 2 then 'Standard'
+                          when 3 then 'Enterprise'
+                          when 4 then 'Express'
+                          when 5 then 'Azure'
+                          else 'Unknown'
+                      end,
+    SERVERPROPERTY('Edition') as 'Edition',
+    @@microsoftversion / 0x01000000 as 'Version',
+    SERVERPROPERTY('ProductVersion') as 'VersionBuild',
+    SERVERPROPERTY('BuildClrVersion') as 'CLRBuildVersion',
+    SERVERPROPERTY('ProductLevel') as 'ProductLevel',
+    SERVERPROPERTY('InstanceName') as 'InstanceName',
+    cpu_count as 'CPUs',
+    --physical_memory_in_bytes / 1048576 as 'RAM',
+    SERVERPROPERTY('IsClustered') as 'Clustered',
+    SERVERPROPERTY('Collation') as 'Collation',
+    SERVERPROPERTY('CollationID') as 'CollationID',
+    SERVERPROPERTY('ComparisonStyle') as 'ComparisonStyle',
+    SERVERPROPERTY('LCID') as 'LCID',
+    SERVERPROPERTY('SqlCharSet') as 'SqlCharSetID',
+    SERVERPROPERTY('SqlCharSetName') as 'SqlCharSetName',
+    SERVERPROPERTY('SqlSortOrderName') as 'SqlSortOrderName',
+    SERVERPROPERTY('IsFullTextInstalled') as 'FullTextInstalled',
+    SERVERPROPERTY('IsIntegratedSecurityOnly') as 'IntegratedSecurityModeOnly',
+    SERVERPROPERTY('IsSingleUser') as 'SingleUserMode',
+    SERVERPROPERTY('ProcessID') as 'SQLServerProcessID',
+    SERVERPROPERTY('ResourceLastUpdateDateTime') as 'ResourceLastUpdateDateTime',
+    SERVERPROPERTY('ResourceVersion') as 'ResourceVersion',
+    os.physical_memory_in_use_kb / 1024 as 'PhysicalMemoryInUse_MB',
+    os.locked_page_allocations_kb / 1024 as 'LockedPageAllocations_MB',
+    os.total_virtual_address_space_kb / 1024 as 'TotalVirtualAddressSpace_MB',
+    os.process_physical_memory_low as 'IsProcessPhysicalMemoryLow',
+    os.process_virtual_memory_low as 'IsProcessVirtualMemoryLow',
+    @TimeZone as 'TimeZone'
+from sys.dm_os_sys_info,
+     sys.dm_os_process_memory as os;
