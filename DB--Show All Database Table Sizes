@@ -1,0 +1,21 @@
+Show All Database Table Sizes
+--https://jonlabelle.com/snippets/view/sql/show-all-database-table-sizes
+
+use <database_name>;
+
+declare @v_TableName varchar(100);
+declare @v_Table table(Table_Name varchar(100));
+
+declare
+  @v_TableSize table(
+    Table_Name varchar(100),
+    ROWS bigint,
+    Reserved varchar(50),
+    ActualDataSize varchar(50),
+    IndexSize varchar(50),
+    Unused varchar(50));
+
+insert into @v_TableSize exec sys.sp_MSforeachtable 'sp_spaceused ''?''';
+
+select * from @v_TableSize as t
+order by cast(replace(t.Reserved, 'KB', '') as int) + cast(replace(t.ActualDataSize, 'KB', '') as int) + cast(replace(t.IndexSize, 'KB', '') as int) + cast(replace(t.Unused, 'KB', '') as int) desc;
