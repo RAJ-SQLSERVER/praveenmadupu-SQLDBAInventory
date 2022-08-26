@@ -1,0 +1,20 @@
+Disable SQL Server Agent Jobs in Category
+
+--https://jonlabelle.com/snippets/view/sql/disable-sql-server-agent-jobs-in-category
+
+declare @sql nvarchar(max);
+
+set @sql = stuff(
+    (
+         select ';' + 'exec msdb.dbo.sp_update_job @job_name = N''' + SJ.name + ''', @Enabled = 0'
+         from msdb.dbo.sysjobs as SJ
+         join msdb.dbo.syscategories as SC
+             on SJ.category_id = SC.category_id
+         where SJ.enabled = 1
+             and SC.name = 'CATEGORY_NAME_HERE'
+         for xml path('')
+    ), 1, 1, ''
+);
+
+-- print @sql;
+exec dbo.sp_executesql @sql;
