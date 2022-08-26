@@ -1,0 +1,138 @@
+Show Failed and Successful Login Attempts
+--https://jonlabelle.com/snippets/view/sql/show-failed-and-successful-login-attempts
+
+SQL Server auditing query to show failed and successful login attempts.
+
+-- =============================================================================
+-- Failed and Successful Login Auditing
+--
+-- This script uses the extended stored procedure "xp_readerrorlog" to pull all
+-- rows within specified search criteria, then dumps the results into temp
+-- tables.
+--
+-- There is a second temp table for failed logins, grouped by User, IP
+-- and Month.
+--
+-- The third temp table is used to find the last successful login per User and
+-- IP.
+--
+-- NOTE: Logging of both successful and failed logins  must be enabled (server
+-- properties).
+--
+-- Based on "By Ryan Loftin, 2015/12/30" By Ryan Loftin, 2015/12/30
+-- http://www.sqlservercentral.com/scripts/Auditing/135465/
+-- =============================================================================
+
+use [master];
+go
+
+declare @FirstDay datetime;
+declare @LastDay datetime;
+
+--
+-- Config
+--
+
+-- Edit start date here, default first day of previous month:
+set @FirstDay = DATEADD(MONTH, DATEDIFF(MONTH, -1, GETDATE()) - 2, 0);
+
+-- Edit end date of log pull here:
+set @LastDay = GETDATE();
+
+--
+-- Drop Pre-existing Temp Tables
+--
+
+if OBJECT_ID('tempdb..#TempLog') is not null
+begin
+    drop table #TempLog;
+end;
+if OBJECT_ID('tempdb..#TempLog2') is not null
+begin
+    drop table #TempLog2;
+end;
+if OBJECT_ID('tempdb..#TempLog3') is not null
+begin
+    drop table #TempLog3;
+end;
+
+--
+--Create temp table for xp_readerrorlog data, raw data dump
+create table #TempLog (
+    LogDate datetime,
+    ProcessInfo nvarchar(50),
+    TEXT nvarchar(2000)
+);
+
+--
+-- Create temp table2 for xp_readerrorlog data, grouped failed logins
+create table #TempLog2 (
+    ServerName nvarchar(255),
+    [User] nvarchar(255),
+    IP nvarchar(255),
+    FailedAttempts int,
+    [Month] nvarchar(255)
+);
+
+--
+-- Create temp table3 for xp_readerrorlog data, last successful login
+create table #TempLog3 (
+    ServerName nvarchar(255),
+    [User] nvarchar(255),
+    IP nvarchar(255),
+    LogDate nvarchar(255)
+);
+
+insert into #TempLog(LogDate, ProcessInfo, TEXT)
+    exec master.dbo.xp_readerrorlog-1, 1, null, null, @FirstDay, @LastDay;
+
+--
+-- Group failed logins
+insert into #TempLog2
+       select @@SERVERNAME as ServerName,
+           SUBSTRING(TEXT, CHARINDEX('''', TEXT)+1, CHARINDEX('''', TEXT, 24)-(CHARINDEX('''', TEXT)+1)) as [User],
+           SUBSTRING(TEXT, CHARINDEX(':', TEXT)+2, CHARINDEX(']', TEXT, 25)-(CHARINDEX(':', TEXT)+2)) as IP,
+           '1' as FailedAttempts, --Failed login count
+           DATENAME(m, LogDate) as [Month]
+       from #TempLog
+       where ProcessInfo = 'Logon' and TEXT like '%Login failed%';
+
+select ServerName, [User], IP, COUNT(FailedAttempts) as FailedAttempts, [Month]
+from #TempLog2
+group by ServerName, [User], IP, [Month]
+order by [User];
+
+--
+-- Last successful login per user:
+insert into #TempLog3
+       select @@SERVERNAME as ServerName,
+           SUBSTRING(TEXT, CHARINDEX('''', TEXT)+1, CHARINDEX('''', TEXT, 28)-(CHARINDEX('''', TEXT)+1)) as [User],
+           SUBSTRING(TEXT, CHARINDEX('[', TEXT)+9, CHARINDEX(']', TEXT, 28)-(CHARINDEX('[', TEXT)+9)) as IP,
+           LogDate as LastLogin
+       from #TempLog
+       where ProcessInfo = 'Logon'
+             and TEXT like '%Login succeeded%'
+             and TEXT not like '%NT AUTHORITY%'
+             and TEXT not like '%Database Mirroring%'
+       group by TEXT, LogDate;
+
+select ServerName, [User], IP, MAX(LogDate) as LastLogin
+from #TempLog3
+group by ServerName, [User], IP;
+
+--
+-- Drop Temp Tables
+--
+
+if OBJECT_ID('tempdb..#TempLog') is not null
+begin
+    drop table #TempLog;
+end;
+if OBJECT_ID('tempdb..#TempLog2') is not null
+begin
+    drop table #TempLog2;
+end;
+if OBJECT_ID('tempdb..#TempLog3') is not null
+begin
+    drop table #TempLog3;
+end;
