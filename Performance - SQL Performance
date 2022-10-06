@@ -1,0 +1,178 @@
+SQL Performance
+
+https://sqltechuniverse.wordpress.com/sql-performance/
+
+Script to get the execution plan of query currently running.
+
+SELECT start_time,session_id,wait_type,last_wait_type, QP.query_plan as [Query Plan], 
+       ST.text AS [Query Text]
+FROM sys.dm_exec_requests AS R
+   CROSS APPLY sys.dm_exec_query_plan(R.plan_handle) AS QP
+   CROSS APPLY sys.dm_exec_sql_text(R.plan_handle) ST;
+
+========================================================================================================
+   Performance and Issue checks
+   
+   --------------------------Session Details-------------------------------
+ 
+SELECT  session_id as SPID,
+        db_name(database_id) as DBName,
+    command,
+    wait_type,last_wait_type,wait_resource,cpu_time as CPUTime_MilliSec,reads,writes,
+     a.text AS Query,
+    start_time,
+    percent_complete,
+    dateadd(second,estimated_completion_time/1000, getdate()) as estimated_completion_time
+    ,getdate() as CurrentTime
+FROM sys.dm_exec_requests r CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) a
+--WHERE  session_id = 107
+ORDER BY start_time ASC
+ 
+----------------------------------Waiting Sessions--------------------------
+select session_id,wait_type,wait_time,last_wait_type from sys.dm_exec_requests where session_id =107
+select * from sys.dm_os_wait_stats
+ 
+---------------------------Indexing Script----------------------------------
+ 
+SELECT 'alter index [' + I.NAME + '] on ' + SC.NAME + '.[' + OBJECT_NAME(S.OBJECT_ID) + ']  REBUILD',
+INDEX_TYPE_DESC,AVG_FRAGMENTATION_IN_PERCENT 
+FROM SYS.DM_DB_INDEX_PHYSICAL_STATS (DB_ID(),NULL,NULL,NULL,NULL) S  
+INNER JOIN SYS.OBJECTS O WITH (NOLOCK) ON S.OBJECT_ID=O.OBJECT_ID 
+INNER JOIN SYS.INDEXES I ON S.INDEX_ID=I.INDEX_ID AND I.OBJECT_ID=S.OBJECT_ID 
+INNER JOIN SYS.SCHEMAS SC ON SC.SCHEMA_ID=O.SCHEMA_ID 
+WHERE O.TYPE='U'AND I.NAME IS NOT NULL
+and  AVG_FRAGMENTATION_IN_PERCENT>30 
+order by  AVG_FRAGMENTATION_IN_PERCENT desc
+ 
+ 
+----------------Stats Update Script-----------------------------------------------
+ 
+ 
+SELECT sc.name as SchemaName,t.name as TableName, s.name as StatsName, sp.last_updated as LastUpdated, [rows], sp.rows_sampled, [rows] - sp.rows_sampled as MissingRows, cast((([rows] - sp.rows_sampled)*100.0)/[rows] as decimal(18,2)) AS PercentMissing
+             ,'UPDATE STATISTICS ' + sc.name+'.['+t.name+']'+ '([' + s.name + ']) WITH FULLSCAN' as Command
+             FROM sys.stats AS s
+             CROSS APPLY sys.dm_db_stats_properties(s.object_id, s.stats_id) AS sp
+             join sys.tables t
+             on sp.object_id = t.object_id
+             join sys.schemas sc
+             on sc.schema_id = t.schema_id
+             WHERE sp.object_id > 100
+             --and t.name in ()
+             and [rows] > rows_sampled
+             and ((([rows] - sp.rows_sampled)*100.0)/[rows]) > 10
+             order by [rows] - sp.rows_sampled desc
+ 
+------------------------Execution Plan for the running problamtic queires-------------------------------------------------
+ 
+SELECT start_time,session_id,wait_type,last_wait_type, QP.query_plan as [Query Plan], 
+       ST.text AS [Query Text]
+FROM sys.dm_exec_requests AS R
+   CROSS APPLY sys.dm_exec_query_plan(R.plan_handle) AS QP
+   CROSS APPLY sys.dm_exec_sql_text(R.plan_handle) ST;
+ 
+ 
+------------------------terminated all process in a DB------------------------------------------------------------------------
+ 
+ 
+USE master;
+DECLARE @kill varchar(8000); SET @kill = '';  
+SELECT @kill = @kill + 'kill ' + CONVERT(varchar(5), spid) + ';' 
+FROM master..sysprocesses  
+WHERE dbid = db_id('DBName')
+EXEC(@kill);
+ 
+----------------------- Validating Memory Pressure ------------------------------------------------------------
+ 
+SELECT * FROM sys.dm_exec_query_resource_semaphores 
+ 
+SELECT session_id,request_time,requested_memory_kb,granted_memory_kb
+ FROM sys.dm_exec_query_memory_grants 
+ 
+ 
+SELECT DB_NAME(database_id) AS [Database Name],
+COUNT(*) * 8/1024.0/1024.0 AS [Cached Size (GB)]
+FROM sys.dm_os_buffer_descriptors
+WHERE database_id > 4 -- system databases
+AND database_id <> 32767 -- ResourceDB
+GROUP BY DB_NAME(database_id)
+ORDER BY [Cached Size (GB)] DESC OPTION (RECOMPILE);  
+ 
+------------------------------Check the current usage of memory---------------------------------------------
+ 
+ DECLARE @TotalSize INT
+ DECLARE @PerUSe DECIMAL (18,2)
+ SET @TotalSize = (select
+      total_physical_memory_kb/1048576 --AS total_physical_memory_GB
+      --available_physical_memory_kb/1048576 AS available_physical_memory_GB,
+      --total_page_file_kb/1048576 AS total_page_file_GB,
+      --available_page_file_kb/1048576 AS available_page_file_GB,
+      --ROUND(100 - (100 * CAST(available_physical_memory_kb AS DECIMAL(18,3))/CAST(total_physical_memory_kb AS DECIMAL(18,3))),2) AS 'Percentage_Used',
+      --system_memory_state_desc
+from  sys.dm_os_sys_memory)
+SET @PerUSe =  (select
+      LEFT(100 - (100 * CAST(available_physical_memory_kb AS DECIMAL(18,3))/CAST(total_physical_memory_kb AS DECIMAL(18,3))),4)
+from  sys.dm_os_sys_memory)
+ 
+--SELECT @PerUSe,@TotalSize
+ 
+SELECT  @@SERVERNAME as InstName,
+        CAST(value as INT)/1024 AS SQLMaxMemorySet_GB, 
+        CAST (value_in_use as INT)/1024 AS SQLMaxMemoryUse_GB,
+        @TotalSize AS Total_SizeGB,
+        @PerUSe as UsedMemoryPercetage,
+         100-@PerUSe as FreeMemPercentage
+        --description 
+FROM sys.configurations
+WHERE description = 'Maximum size of server memory (MB)'
+ORDER BY name OPTION (RECOMPILE)
+ 
+ 
+--dbcc dropcleanbuffers 
+ 
+----------------------------------------------blocking/sessions in details ----------------------------------------------------
+ 
+SELECT s.session_id
+    ,r.STATUS
+    ,r.blocking_session_id AS 'blocked_by'
+    ,r.wait_type
+    ,r.wait_resource
+    ,CONVERT(VARCHAR, DATEADD(ms, r.wait_time, 0), 8) AS 'wait_time'
+    ,r.cpu_time
+    ,r.logical_reads
+    ,r.reads
+    ,r.writes
+    ,CONVERT(varchar, (r.total_elapsed_time/1000 / 86400))+ 'd ' +
+     CONVERT(VARCHAR, DATEADD(ms, r.total_elapsed_time, 0), 8)   AS 'elapsed_time'
+    ,CAST((
+            '<?query --  ' + CHAR(13) + CHAR(13) + Substring(st.TEXT, (r.statement_start_offset / 2) + 1, (
+                    (
+                        CASE r.statement_end_offset
+                            WHEN - 1
+                                THEN Datalength(st.TEXT)
+                            ELSE r.statement_end_offset
+                            END - r.statement_start_offset
+                        ) / 2
+                    ) + 1) + CHAR(13) + CHAR(13) + '--?>'
+            ) AS XML) AS 'query_text'
+    ,COALESCE(QUOTENAME(DB_NAME(st.dbid)) + N'.' + QUOTENAME(OBJECT_SCHEMA_NAME(st.objectid, st.dbid)) + N'.' + 
+     QUOTENAME(OBJECT_NAME(st.objectid, st.dbid)), '') AS 'stored_proc'
+    --,qp.query_plan AS 'xml_plan'  -- uncomment (1) if you want to see plan
+    ,r.command
+    ,s.login_name
+    ,s.host_name
+    ,s.program_name
+    ,s.host_process_id
+    ,s.last_request_end_time
+    ,s.login_time
+    ,r.open_transaction_count
+FROM sys.dm_exec_sessions AS s
+INNER JOIN sys.dm_exec_requests AS r ON r.session_id = s.session_id
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS st
+--OUTER APPLY sys.dm_exec_query_plan(r.plan_handle) AS qp -- uncomment (2) if you want to see plan
+WHERE r.wait_type NOT LIKE 'SP_SERVER_DIAGNOSTICS%'
+    OR r.session_id != @@SPID
+ORDER BY r.cpu_time DESC
+    ,r.STATUS
+    ,r.blocking_session_id
+    ,s.session_id
+
