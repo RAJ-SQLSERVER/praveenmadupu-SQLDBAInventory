@@ -1,0 +1,145 @@
+CPU and Memory
+
+--https://sqltechuniverse.wordpress.com/cpu-and-memory/
+
+CPU signal wait time
+===================
+
+This metric measures the percentage of time spent waiting for CPU resources to service a thread. 
+A high signal wait time for all wait types may indicate that CPUs are being overused, forcing tasks to wait for SQL Server processes. 
+The values are calculated/accumulated as of the last restart of the server, or if they are reset using:
+
+DBCC SQLPERF ('sys.dm_os_wait_stats', CLEAR);
+
+Total waits are wait_time_ms (high signal waits indicates CPU pressure)
+=======================================================================
+
+SELECT  CAST(100.0 * SUM(signal_wait_time_ms) / SUM(wait_time_ms)
+                              AS NUMERIC(20,2)) AS signal_cpu_waits
+FROM    sys.dm_os_wait_stats ;
+
+CPU utilization
+===============
+DECLARE @SQLServerProductVersion AS INT
+SET @SQLServerProductVersion =  LEFT(CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128)),CHARINDEX('.',CAST(SERVERPROPERTY('ProductVersion') AS NVARCHAR(128)),0)-1)
+ 
+--DROP TABLE #CPU
+-- Get CPU utilization by database (adapted from Robert Pearl)  (Query 20) (CPU Usage by Database)
+IF OBJECT_ID('tempdb..#CPU') IS NULL
+BEGIN
+    CREATE TABLE #CPU (
+    DatabaseName VARCHAR(128),
+    CPU_Time_Ms BIGINT,
+    Date_Time DATETIME
+    )
+END
+ 
+ 
+IF @SQLServerProductVersion < 11 -- SQL Server 2008 R2 or less
+BEGIN
+ 
+    IF OBJECT_ID('tempdb..#CPU') IS NOT NULL
+    BEGIN
+        INSERT INTO #CPU (DatabaseName, CPU_Time_Ms, Date_Time)
+        SELECT DB_Name(DatabaseID) AS [DatabaseName], SUM(total_worker_time) AS [CPU_Time_Ms], GETDATE()
+         FROM sys.dm_exec_query_stats AS qs
+         CROSS APPLY (SELECT CONVERT(int, value) AS [DatabaseID] 
+                      FROM sys.dm_exec_plan_attributes(qs.plan_handle)
+                      WHERE attribute = N'dbid') AS F_DB
+--              WHERE DB_Name(DatabaseID) <> 'TMC_NEXT'
+            WHERE DatabaseID > 4 -- system databases
+                AND DatabaseID <> 32767 -- ResourceDB
+         GROUP BY DatabaseID
+    END
+    ELSE
+    BEGIN
+        WITH DB_CPU_Stats
+        AS
+        (SELECT DatabaseID, DB_Name(DatabaseID) AS [DatabaseName], SUM(total_worker_time) AS [CPU_Time_Ms]
+         FROM sys.dm_exec_query_stats AS qs
+         CROSS APPLY (SELECT CONVERT(int, value) AS [DatabaseID] 
+                      FROM sys.dm_exec_plan_attributes(qs.plan_handle)
+                      WHERE attribute = N'dbid') AS F_DB
+         GROUP BY DatabaseID)
+        SELECT ROW_NUMBER() OVER(ORDER BY [CPU_Time_Ms] DESC) AS [row_num],
+               DatabaseName, [CPU_Time_Ms], 
+               CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPUPercent]
+        FROM DB_CPU_Stats
+        WHERE DatabaseID > 4 -- system databases
+        AND DatabaseID <> 32767 -- ResourceDB
+        ORDER BY row_num OPTION (RECOMPILE);
+    END;
+     
+ 
+ 
+END
+ELSE
+BEGIN
+    WITH DB_CPU_Stats
+    AS
+    (SELECT DatabaseID, DB_Name(DatabaseID) AS [Database Name], SUM(total_worker_time) AS [CPU_Time_Ms]
+     FROM sys.dm_exec_query_stats AS qs
+     CROSS APPLY (SELECT CONVERT(int, value) AS [DatabaseID] 
+                  FROM sys.dm_exec_plan_attributes(qs.plan_handle)
+                  WHERE attribute = N'dbid') AS F_DB
+     GROUP BY DatabaseID)
+    SELECT ROW_NUMBER() OVER(ORDER BY [CPU_Time_Ms] DESC) AS [CPU Rank],
+           [Database Name], [CPU_Time_Ms] AS [CPU Time (ms)], 
+           CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPU Percent]
+    FROM DB_CPU_Stats
+    WHERE DatabaseID <> 32767 -- ResourceDB
+    ORDER BY [CPU Rank] OPTION (RECOMPILE);
+END;
+ 
+IF OBJECT_ID('tempdb..#CPU') IS NOT NULL
+BEGIN
+    WITH DB_CPU_Stats
+    AS
+    (SELECT DatabaseName, MAX(CPU_Time_Ms) - MIN(CPU_Time_Ms) AS CPU_Time_Ms
+     FROM #CPU 
+     GROUP BY DatabaseName
+         HAVING  MAX(CPU_Time_Ms) - MIN(CPU_Time_Ms) > 0  )
+    SELECT ROW_NUMBER() OVER(ORDER BY [CPU_Time_Ms] DESC) AS [row_num],
+           DatabaseName, [CPU_Time_Ms], 
+           CAST([CPU_Time_Ms] * 1.0 / SUM([CPU_Time_Ms]) OVER() * 100.0 AS DECIMAL(5, 2)) AS [CPUPercent]
+    FROM DB_CPU_Stats
+    ORDER BY row_num OPTION (RECOMPILE);
+END;
+ 
+--TRUNCATE TABLE #CPU
+    --DatabaseName VARCHAR(128),
+    --CPU_Time_Ms BIGINT,
+    --Date_Time DATETIME
+    
+CPU Utilization for last 30 Minutes( Customize as per your requirements)
+========================================================================
+-- #######################################################################################################################################################
+-- CPU Utilization History
+-- Get CPU Utilization History for last 30 minutes (in one minute intervals) 
+-- This version works with SQL Server 2008 and SQL Server 2008 R2 only 
+-- #######################################################################################################################################################
+ 
+DECLARE @ts_now BIGINT = ( SELECT   cpu_ticks / ( cpu_ticks / ms_ticks )
+                           FROM     sys.dm_os_sys_info) ; 
+                            
+SELECT TOP ( 30 )
+        SQLProcessUtilization AS [SQL Server Process CPU Utilization] ,
+        SystemIdle AS [System Idle Process] ,
+        100 - SystemIdle - SQLProcessUtilization
+                   AS [Other Process CPU Utilization] ,
+        DATEADD(ms, -1 * ( @ts_now - [timestamp] ), GETDATE()) AS [Event Time] 
+FROM    ( SELECT    record.value('(./Record/@id)[1]', 'int')  AS record_id, 
+                    record.value('(./Record/SchedulerMonitorEvent/
+                                    SystemHealth/SystemIdle)[1]','int')
+                                                              AS [SystemIdle] ,
+                    record.value('(./Record/SchedulerMonitorEvent/
+                                    SystemHealth/ProcessUtilization)[1]','int') AS [SQLProcessUtilization] ,
+                    [timestamp] 
+          FROM      ( SELECT  [timestamp] ,
+                              CONVERT(XML, record) AS [record]
+                      FROM  sys.dm_os_ring_buffers
+                      WHERE ring_buffer_type = N'RING_BUFFER_SCHEDULER_MONITOR'
+                        AND record LIKE N'%<SystemHealth>%'
+                    ) AS x
+        ) AS y
+ORDER BY record_id DESC ;
