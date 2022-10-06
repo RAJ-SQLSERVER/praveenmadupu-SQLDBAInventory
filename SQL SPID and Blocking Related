@@ -1,0 +1,354 @@
+SQL SPID and Blocking Related
+--https://sqltechuniverse.wordpress.com/queries/sql-spid-and-blocking-related/
+
+Script to create the blocking capture Job
+
+==============================================================TempTable_BlockedSPID==========================================
+ 
+CREATE TABLE [dbo].[Temp_BlockedSPID](
+       [BlockedSessions] [int] NOT NULL,
+       [DBName] [varchar](250),
+       [WaitSecs] [varchar](150) NOT NULL,
+       [BlockedSPID] [int] NOT NULL,
+       [wait_type] [varchar](max) NOT NULL,
+       [status] [varchar](max) NOT NULL,
+       [login_name] [varchar](150) NOT NULL,
+       [host_name] [varchar](max) NOT NULL,
+       [program_name] [varchar](max) NOT NULL,
+       [host_process_id] [int] NOT NULL,
+       [login_time] [datetime] NOT NULL,
+       [MostRecentSQL] [varchar](max) NOT NULL
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+GO
+ 
+==============================================================TempTable_BlockingSPID==========================================
+ 
+ 
+ 
+CREATE TABLE [dbo].[Temp_BlockingSPID](
+       [LeadBlocker] [int] NOT NULL,
+       [Status] [varchar](150) NOT NULL,
+       [DBName] [varchar](250),
+       [login_name] [varchar](150) NOT NULL,
+       [host_name] [varchar](max) NOT NULL,
+       [program_name] [varchar](max) NOT NULL,
+       [host_process_id] [int] NOT NULL,
+       [login_time] [datetime] NOT NULL,
+       [MostRecentSQL] [varchar](max) NOT NULL
+) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
+GO
+ 
+ 
+ 
+ 
+==============================================================SQL Job Query to Capture and insert the data to above table==========================================
+ 
+ 
+declare  @sqlstr nvarchar(max)
+declare @blockers table (
+blockers int,
+blocked int
+)
+set @sqlstr = N'select der.blocking_session_id,session_id from sys.dm_exec_requests der where der.session_id>50
+and der.blocking_session_id>0'
+insert into @blockers execute sp_executesql @sqlstr;
+--Lead blocker script
+INSERT INTO [dbo].[Temp_BlockingSPID]
+select dec.session_id as LeadBlocker, des.status,db_name(des.database_id), des.login_name, des.host_name, des.program_name, des.host_process_id, des.login_time, t.text as MostRecentSQL
+from sys.dm_exec_connections dec
+INNER JOIN sys.dm_exec_sessions des ON dec.session_id=des.session_id
+CROSS APPLY sys.dm_exec_sql_text(dec.most_recent_sql_handle) t
+where dec.session_id in (select distinct blockers from @blockers where blockers not in (select blocked from @blockers))
+--Blocked processes)
+INSERT INTO [dbo].[Temp_BlockedSPID]
+select der.session_id as BlockedSessions,db_name(des.database_id),convert(numeric(20,2),der.wait_time/1000) as WaitSecs, der.blocking_session_id as Blocker,der.wait_type,des.status,des.login_name,des.host_name,des.program_name,des.host_process_id,des.login_time,t.text as MostRecentSQL
+from sys.dm_exec_requests der
+INNER JOIN sys.dm_exec_sessions des ON der.session_id=des.session_id
+CROSS APPLY sys.dm_exec_sql_text (der.sql_handle) t
+where der.session_id in (select distinct blocked from @blockers)
+ 
+==============================================================Testing the same==========================================
+ 
+ 
+ 
+CREATE TABLE [dbo].[Temp_test](
+    [BlockedSessions] [int] NOT NULL,
+    ) 
+GO
+ 
+BEGIN TRAN 
+INSERT INTO [dbo].[Temp_test] values(10)
+ROLLBACK
+ 
+DROP table [dbo].[Temp_test]
+ 
+select * from [dbo].[Temp_BlockedSPID_updated]
+go
+select * from [dbo].[Temp_BlockingSPID_updated]
+
+================================================================================================================================================
+Blocking SPID and Head blocker
+
+select spid as [Blocking spid],loginame,hostname,program_name as progname,cmd,status,physical_io,waittype
+from master.dbo.sysprocesses 
+where spid in (select blocked from master.dbo.sysprocesses)
+and blocked=0 
+ 
+ 
+----------------------------------------
+ 
+ 
+SELECT s.session_id
+    ,r.STATUS
+    ,r.blocking_session_id AS 'blocked_by'
+    ,r.wait_type
+    ,r.wait_resource
+    ,CONVERT(VARCHAR, DATEADD(ms, r.wait_time, 0), 8) AS 'wait_time'
+    ,r.cpu_time
+    ,r.logical_reads
+    ,r.reads
+    ,r.writes
+    ,CONVERT(varchar, (r.total_elapsed_time/1000 / 86400))+ 'd ' +
+     CONVERT(VARCHAR, DATEADD(ms, r.total_elapsed_time, 0), 8)   AS 'elapsed_time'
+    ,CAST((
+            '<?query --  ' + CHAR(13) + CHAR(13) + Substring(st.TEXT, (r.statement_start_offset / 2) + 1, (
+                    (
+                        CASE r.statement_end_offset
+                            WHEN - 1
+                                THEN Datalength(st.TEXT)
+                            ELSE r.statement_end_offset
+                            END - r.statement_start_offset
+                        ) / 2
+                    ) + 1) + CHAR(13) + CHAR(13) + '--?>'
+            ) AS XML) AS 'query_text'
+    ,COALESCE(QUOTENAME(DB_NAME(st.dbid)) + N'.' + QUOTENAME(OBJECT_SCHEMA_NAME(st.objectid, st.dbid)) + N'.' + 
+     QUOTENAME(OBJECT_NAME(st.objectid, st.dbid)), '') AS 'stored_proc'
+    --,qp.query_plan AS 'xml_plan'  -- uncomment (1) if you want to see plan
+    ,r.command
+    ,s.login_name
+    ,s.host_name
+    ,s.program_name
+    ,s.host_process_id
+    ,s.last_request_end_time
+    ,s.login_time
+    ,r.open_transaction_count
+FROM sys.dm_exec_sessions AS s
+INNER JOIN sys.dm_exec_requests AS r ON r.session_id = s.session_id
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) AS st
+--OUTER APPLY sys.dm_exec_query_plan(r.plan_handle) AS qp -- uncomment (2) if you want to see plan
+WHERE r.wait_type NOT LIKE 'SP_SERVER_DIAGNOSTICS%'
+    OR r.session_id != @@SPID
+ORDER BY r.cpu_time DESC
+    ,r.STATUS
+    ,r.blocking_session_id
+    ,s.session_id
+ 
+------------------------------------------------lead blocker----------------------------
+ 
+declare  @sqlstr nvarchar(max)
+declare @blockers table (
+blockers int,
+blocked int
+)
+set @sqlstr = N'select der.blocking_session_id,session_id from sys.dm_exec_requests der where der.session_id>50
+and der.blocking_session_id>0'
+insert into @blockers execute sp_executesql @sqlstr;
+--Lead blocker script
+select dec.session_id as LeadBlocker, des.status, des.login_name, des.host_name, des.program_name, des.host_process_id, des.login_time, t.text as MostRecentSQL
+from sys.dm_exec_connections dec
+INNER JOIN sys.dm_exec_sessions des ON dec.session_id=des.session_id
+CROSS APPLY sys.dm_exec_sql_text(dec.most_recent_sql_handle) t
+where dec.session_id in (select distinct blockers from @blockers where blockers not in (select blocked from @blockers))
+--Blocked processes
+select der.session_id as BlockedSessions,convert(numeric(20,2),der.wait_time/1000) as WaitSecs, der.blocking_session_id as Blocker,der.wait_type,des.status,des.login_name,des.host_name,des.program_name,des.host_process_id,des.login_time,t.text as MostRecentSQL
+from sys.dm_exec_requests der
+INNER JOIN sys.dm_exec_sessions des ON der.session_id=des.session_id
+CROSS APPLY sys.dm_exec_sql_text (der.sql_handle) t
+where der.session_id in (select distinct blocked from @blockers)
+
+==================================================================================================================================
+Getting the session details – What is Running in SQL Server
+
+
+SELECT r.wait_resource
+    --  ,r.percent_complete,
+    , DATEDIFF(ss, start_time, GETDATE()) AS [Duration (sec)]
+    ,start_time
+    ,r.STATUS
+    ,r.session_id
+    ,r.[wait_type]
+    ,d.NAME [DB_Name]
+    ,r.[blocking_session_id]
+    ,'"'+SUBSTRING(s.TEXT, (r.statement_start_offset / 2) + 1, (
+            (
+                CASE
+                    WHEN r.statement_end_offset < 1
+                        THEN DATALENGTH(s.TEXT)
+                    ELSE (r.statement_end_offset - r.statement_start_offset) / 2
+                    END
+                )
+            ) + 1)+'"' AS [Current_Statement]
+    ,'"'+s.text+'"' [Full_Text], 
+    r.[cpu_time]
+    ,r.[reads]
+    ,r.[writes]
+    ,r.[logical_reads]
+    ,l.login_name
+    ,l.host_name
+    ,l.program_name
+    ,(
+        SELECT count(spid) THREADS
+        FROM sys.sysprocesses tp
+        WHERE tp.spid = r.session_id
+        GROUP BY spid
+        ) threads
+    --,p.query_plan
+    ,r.[request_id]
+    --      ,r.[start_time]
+    ,r.[command]
+    --      ,r.[sql_handle]
+    --      ,r.[statement_start_offset]
+    --      ,r.[statement_end_offset]
+    --      ,r.[plan_handle]
+    --      ,r.[database_id]
+    ,r.[user_id]
+    --      ,r.[connection_id]
+    ,r.[total_elapsed_time]
+    ,r.[wait_time]
+    ,r.[last_wait_type]
+    ,r.[open_transaction_count]
+    --      ,r.[open_resultset_count]
+    ,r.[transaction_id]
+    --      ,r.[context_info]
+    --      ,r.[estimated_completion_time]
+    ,r.[scheduler_id]
+    --      ,r.[task_address]
+    --      ,r.[text_size]
+    ,r.[language]
+    --      ,r.[date_format]
+    --      ,r.[date_first]
+    --      ,r.[quoted_identifier]
+    --      ,r.[arithabort]
+    --      ,r.[ansi_null_dflt_on]
+    --      ,r.[ansi_defaults]
+    --      ,r.[ansi_warnings]
+    --      ,r.[ansi_padding]
+    --      ,r.[ansi_nulls]
+    --      ,r.[concat_null_yields_null]
+    ,r.[transaction_isolation_level]
+    ,r.[lock_timeout]
+    ,r.[deadlock_priority]
+    --      ,r.[row_count]
+    --      ,r.[prev_error]
+    ,r.[nest_level]
+    ,r.[granted_query_memory]
+--      ,r.[executing_managed_code]
+--      ,r.[group_id]
+--      ,r.[query_hash] 
+--      ,r.[query_plan_hash]
+FROM sys.dm_exec_requests r
+INNER JOIN sys.databases d
+    ON r.database_id = d.database_id
+LEFT JOIN sys.dm_exec_sessions l
+    ON r.session_id = l.session_id
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) s
+CROSS APPLY    sys.dm_exec_query_plan(r.plan_handle) p   
+WHERE r.session_id != @@spid
+    AND s.TEXT NOT LIKE '%sp_trace_getdata%'
+ORDER BY 4 DESC
+    ,3
+    --SELECT @@SPID
+    ===============================================================================================================================
+    
+    Blocking Tree – Capture
+
+/*  SQL Blocking Tree w/Cursor info
+Thanks SQL Server Expert JOHNNYBNO 
+*/
+IF OBJECT_ID('tempdb..#Blocks') IS NOT NULL
+    DROP TABLE #Blocks
+SELECT   spid
+        ,blocked
+        ,REPLACE (REPLACE (st.TEXT, CHAR(10), ' '), CHAR (13), ' ' ) AS batch
+INTO     #Blocks
+FROM     sys.sysprocesses spr
+    CROSS APPLY sys.dm_exec_sql_text(spr.SQL_HANDLE) st
+GO
+   
+WITH BlockingTree (spid, blocking_spid, [level], batch)
+AS
+(
+    SELECT   blc.spid
+            ,blc.blocked
+            ,CAST (REPLICATE ('0', 4-LEN (CAST (blc.spid AS VARCHAR))) + CAST (blc.spid AS VARCHAR) AS VARCHAR (1000)) AS [level]
+            ,blc.batch
+    FROM    #Blocks blc
+    WHERE   (blc.blocked = 0 OR blc.blocked = SPID) AND
+            EXISTS (SELECT * FROM #Blocks blc2 WHERE blc2.BLOCKED = blc.SPID AND blc2.BLOCKED <> blc2.SPID)
+    UNION ALL
+    SELECT   blc.spid
+            ,blc.blocked
+            ,CAST(bt.[level] + RIGHT (CAST ((1000 + blc.SPID) AS VARCHAR (100)), 4) AS VARCHAR (1000)) AS [level]
+            ,blc.batch
+    FROM     #Blocks AS blc
+        INNER JOIN BlockingTree bt 
+            ON  blc.blocked = bt.SPID
+    WHERE   blc.blocked > 0 AND
+            blc.blocked <> blc.SPID
+)
+SELECT  N'' + ISNULL(REPLICATE (N'|         ', LEN (LEVEL)/4 - 2),'')
+        + CASE WHEN (LEN(LEVEL)/4 - 1) = 0 THEN '' ELSE '|------  ' END
+        + CAST (bt.SPID AS NVARCHAR (10)) AS BlockingTree
+        ,spr.lastwaittype   AS [Type]
+        ,spr.loginame       AS [Login Name]
+        ,DB_NAME(spr.dbid)  AS [Source database]
+        ,st.text            AS [SQL Text]
+        ,CASE WHEN cur.sql_handle IS NULL THEN '' ELSE (SELECT [TEXT] FROM sys.dm_exec_sql_text (cur.sql_handle)) END  AS [Cursor SQL Text]
+        ,DB_NAME(sli.rsc_dbid)  AS [Database]
+        ,OBJECT_SCHEMA_NAME(sli.rsc_objid,sli.rsc_dbid) AS [Schema]
+        ,OBJECT_NAME(sli.rsc_objid, sli.rsc_dbid) AS [Table]
+        ,spr.waitresource   AS [Wait Resource]
+        ,spr.cmd            AS [Command]
+        ,spr.program_name   AS [Application]
+        ,spr.hostname       AS [HostName]
+        ,spr.last_batch     AS [Last Batch Time]
+FROM BlockingTree bt
+    LEFT OUTER JOIN sys.sysprocesses spr 
+        ON  spr.spid = bt.spid
+    CROSS APPLY sys.dm_exec_sql_text(spr.SQL_HANDLE) st
+    LEFT JOIN sys.dm_exec_cursors(0) cur
+        ON  cur.session_id = spr.spid AND
+            cur.fetch_status != 0
+    JOIN sys.syslockinfo sli
+        ON  sli.req_spid = spr.spid AND
+            sli.rsc_type = 5 AND
+            OBJECT_NAME(sli.rsc_objid, sli.rsc_dbid) IS NOT NULL
+ORDER BY LEVEL ASC
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
